@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>rally-cut</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, system-ui, sans-serif; margin: 0;
+         padding: 24px 16px calc(24px + env(safe-area-inset-bottom));
+         max-width: 560px; margin-inline: auto; font-size: 16px; line-height: 1.5; }
+  h1 { font-size: 1.5em; margin: 0 0 4px; }
+  p.sub { opacity: .65; margin: 0 0 24px; }
+  a.card { display: block; text-decoration: none; color: inherit;
+           border: 1px solid #8886; border-radius: 14px; padding: 18px 18px;
+           margin: 12px 0; background: #8881; }
+  a.card:active { background: #8882; }
+  a.card .t { font-size: 1.15em; font-weight: 700; color: #2563eb; }
+  a.card .d { font-size: .9em; opacity: .75; margin-top: 4px; }
+  .note { font-size: .8em; opacity: .6; margin-top: 28px; }
+</style>
+</head>
+<body>
+<h1>rally-cut</h1>
+<p class="sub">테니스 영상에서 포인트 사이 죽은 시간을 자동으로 잘라내는 도구</p>
+
+<a class="card" href="web/app/">
+  <div class="t">분석 · 검수 (V0.5) →</div>
+  <div class="d">영상을 골라 랠리 구간을 찾고, KEEP/CUT 토글 후 cuts.csv 내보내기</div>
+</a>
+
+<a class="card" href="web/spike/">
+  <div class="t">기술 스파이크 (W0) →</div>
+  <div class="d">아이폰 사파리 WebCodecs · pose · 컷 출력 실측 4종</div>
+</a>
+
+<p class="note">
+  설치 불필요 — 브라우저에서 동작. 영상은 기기 안에서만 처리되며 서버로 전송되지 않습니다.
+  소스: <a href="https://github.com/CS-kwill/rally-cut">github.com/CS-kwill/rally-cut</a>
+</p>
+</body>
+</html>

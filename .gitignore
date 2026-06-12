@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+*.wav
+*.mp4
+!tests/**/*.mp4
+.pytest_cache/
+/out/
+/work/
+*.pt
+work_yolo/

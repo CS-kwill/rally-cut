@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rally-cut W0 스파이크</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, system-ui, sans-serif; margin: 0; padding: 12px;
+         max-width: 720px; margin-inline: auto; font-size: 15px; }
+  h1 { font-size: 1.2em; }
+  fieldset { border: 1px solid #8884; border-radius: 8px; margin-bottom: 10px; }
+  legend { font-weight: 600; }
+  button { font-size: 15px; padding: 8px 14px; border-radius: 8px; border: 1px solid #8886;
+           background: #2563eb; color: #fff; margin: 2px 0; }
+  button:disabled { opacity: .4; }
+  button.aux { background: #6b7280; }
+  input[type=number] { width: 70px; font-size: 15px; padding: 4px; }
+  input[type=file] { font-size: 14px; max-width: 100%; }
+  label { margin-right: 8px; }
+  pre { background: #8881; border-radius: 8px; padding: 8px; white-space: pre-wrap;
+        word-break: break-all; font-size: 12px; }
+  #log { height: 140px; overflow-y: auto; }
+  .hint { font-size: 12px; opacity: .7; margin: 4px 0; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mp4box@0.5.2/dist/mp4box.all.min.js"></script>
+</head>
+<body>
+<h1>rally-cut W0 기술 스파이크</h1>
+<p class="hint">아이폰 13 Pro 사파리 실측용. 카메라로 찍은 1080p60 영상(가능하면 17분급, 최소 1~2분)을 선택하고
+①→②→③→④ 순서로 실행한 뒤 <b>보고서 복사</b>로 결과를 전달하세요.</p>
+
+<fieldset>
+  <legend>영상 파일</legend>
+  <input id="file" type="file" accept="video/*">
+</fieldset>
+
+<fieldset>
+  <legend>① WebCodecs 디코딩 처리량</legend>
+  <label>측정 구간 <input id="t1sec" type="number" value="60">초 (0=전체)</label>
+  <button id="t1" class="test" disabled>실행</button>
+  <p class="hint">1080p60을 몇 배속으로 읽을 수 있는지. 17분 영상 예상 처리시간을 산출합니다.</p>
+</fieldset>
+
+<fieldset>
+  <legend>② pose 추론 속도</legend>
+  <label>프레임 <input id="t2n" type="number" value="120"></label>
+  <label>stride <input id="t2stride" type="number" value="4"></label><br>
+  <button id="t2mp" class="test" disabled>MediaPipe(WebGL)</button>
+  <button id="t2wasm" class="test" disabled>YOLO ONNX(wasm)</button>
+  <button id="t2gpu" class="test" disabled>YOLO ONNX(webgpu)</button>
+  <p class="hint">stride 4 = 60fps 영상을 15fps로 샘플링하는 실제 사용 패턴. 세 가지를 각각 실행해 비교.</p>
+</fieldset>
+
+<fieldset>
+  <legend>③ 키프레임 스냅 컷 + 재먹싱 + 저장</legend>
+  <label>시작 <input id="t3start" type="number" value="5">s</label>
+  <label>끝 <input id="t3end" type="number" value="20">s</label>
+  <button id="t3" class="test" disabled>컷 생성</button>
+  <button id="t3share" class="aux" disabled>공유/저장</button>
+  <button id="t3dl" class="aux" disabled>다운로드</button>
+  <p class="hint">생성 후 [공유/저장]→"비디오 저장"으로 카메라롤 저장이 되는지, 결과물이 정상 재생되는지 확인.</p>
+</fieldset>
+
+<fieldset>
+  <legend>④ 대용량 Blob 스트리밍</legend>
+  <label>청크 <input id="t4mb" type="number" value="16">MB</label>
+  <button id="t4" class="test" disabled>실행</button>
+  <p class="hint">1GB급 파일을 통째 로드 없이 슬라이스로 완주할 수 있는지 + 처리량(MB/s).</p>
+</fieldset>
+
+<button id="copy">📋 보고서 복사</button>
+
+<h3>로그</h3>
+<pre id="log"></pre>
+<h3>보고서</h3>
+<pre id="report"></pre>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
