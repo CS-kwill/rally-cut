@@ -1,8 +1,10 @@
 // rally-cut 웹앱 V0.5 — 분석(오디오 온셋·군집) + 검수(탭 점프·keep 토글) + cuts.csv 내보내기.
 // 컷 영상 출력은 W1 후속(스파이크 ③ 검증 후). 기존 파라미터 고정 = Python CLI(audio-only)와 동일.
-import { extractAudio } from './audio.js';
-import { detectHits } from './dsp.js';
-import { buildSegments, writeCutsCsv, formatTc, shortTc } from './segments.js';
+import { extractAudio } from './audio.js?v=2';
+import { detectHits } from './dsp.js?v=2';
+import { buildSegments, writeCutsCsv, formatTc, shortTc } from './segments.js?v=2';
+
+const BUILD = 'v2';
 
 const PARAMS = { maxGap: 3.0, minHits: 3, padPre: 1.5, padPost: 2.0, minDuration: 3.0 };
 const MIN_KEEP = 8.0; // CLI audio-only 경로의 --min-keep-duration 기본값과 동일
@@ -168,4 +170,8 @@ window.addEventListener('error', (e) => status('오류: ' + e.message));
 window.addEventListener('unhandledrejection',
   (e) => status('오류: ' + (e.reason && e.reason.message || e.reason)));
 
-status('영상 파일을 선택하세요.');
+{
+  const sm = document.querySelector('h1 small');
+  if (sm) sm.textContent += ` · ${BUILD}`;
+}
+status(`영상 파일을 선택하세요. (build ${BUILD})`);

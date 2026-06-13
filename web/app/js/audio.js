@@ -1,7 +1,7 @@
 // 영상 파일 → 22050Hz mono Float32Array (rally_cut/audio.extract_audio와 동일 규약).
 // 경로: mp4box로 AAC 트랙만 추출 → ADTS 래핑 → decodeAudioData(22050 컨텍스트가
 // 리샘플) → 채널 평균. 1GB 파일도 비디오 트랙을 메모리에 들이지 않는다.
-import { demux, audioSpecificConfig } from './demux.js';
+import { demux, audioSpecificConfig } from './demux.js?v=2';
 
 const TARGET_SR = 22050;
 
