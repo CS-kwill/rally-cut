@@ -47,11 +47,29 @@ export async function demux(blob, opts) {
   let aTrackId = null;
   const vq = [];
   const aq = [];
+  const seenV = new Set();
+  const seenA = new Set();
 
   mp4file.onError = (e) => { fatal = new Error('mp4box: ' + e); };
   mp4file.onReady = (i) => { info = i; };
+  // 핵심: mp4box는 moov-at-end(.MOV) + seek 재추출 시 샘플을 뒤섞인 순서로 중복
+  // 재방출하고, releaseUsedSamples는 보관 중인 샘플 객체의 .data를 null로 만든다.
+  // onSamples 참조를 그대로 큐에 쌓으면 아직 처리 안 한 샘플의 data가 null이 된다.
+  // → 방출 즉시 data를 복제하고 번호로 중복제거한 뒤 곧바로 release(메모리 회수).
   mp4file.onSamples = (id, _user, samples) => {
-    (id === vTrackId ? vq : aq).push(...samples);
+    const isV = id === vTrackId;
+    const q = isV ? vq : aq;
+    const seen = isV ? seenV : seenA;
+    for (const s of samples) {
+      if (seen.has(s.number) || s.data == null) continue;
+      seen.add(s.number);
+      q.push({
+        number: s.number, cts: s.cts, dts: s.dts, duration: s.duration,
+        timescale: s.timescale, is_sync: s.is_sync, size: s.size,
+        data: s.data.slice(),
+      });
+    }
+    if (samples.length) mp4file.releaseUsedSamples(id, samples[samples.length - 1].number);
   };
 
   let offset = 0;
@@ -59,18 +77,17 @@ export async function demux(blob, opts) {
   let stopped = false;
   let skipped = false; // moov 탐색 중 mdat을 건너뛰었는가
 
+  // 큐 항목은 이미 복제본(onSamples에서 release 완료) — 여기선 소비만 한다.
   const drain = async () => {
     while ((vq.length || aq.length) && !stopped) {
       if (vq.length) {
         const s = vq.shift();
         const r = opts.onVideoSample ? await opts.onVideoSample(s) : undefined;
-        mp4file.releaseUsedSamples(vTrackId, s.number);
         if (r === false) { stopped = true; return; }
       }
       if (aq.length) {
         const s = aq.shift();
         if (opts.onAudioSample) await opts.onAudioSample(s);
-        if (aTrackId !== null) mp4file.releaseUsedSamples(aTrackId, s.number);
       }
     }
   };
@@ -82,7 +99,10 @@ export async function demux(blob, opts) {
     buf.fileStart = offset;
     const next = mp4file.appendBuffer(buf);
     let newOffset = end;
-    if (typeof next === 'number' && next > end) { newOffset = next; skipped = true; }
+    // 전방 점프(mdat 건너뛰기)는 moov를 찾기 전(=!started)에만 따른다. moov를 찾고
+    // 추출을 시작한 뒤에도 점프하면 mdat 대부분을 건너뛰어 ~16초분만 읽고 끝난다.
+    // started 이후엔 순차로 읽어 샘플 데이터를 모두 확보한다.
+    if (typeof next === 'number' && next > end && !started) { newOffset = next; skipped = true; }
 
     if (info && !started) {
       const vt = info.videoTracks[0];
