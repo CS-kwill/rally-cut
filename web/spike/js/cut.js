@@ -68,6 +68,9 @@ export async function snapCut(file, { startSec = 5, endSec = 20, log }) {
         numberOfChannels: aTrack.audio.channel_count,
       } : undefined,
       fastStart: 'in-memory',
+      // HEVC는 B-프레임 때문에 DTS≠CTS라 수동 오프셋 후에도 첫 DTS가 0이 아닐 수 있음.
+      // 모든 타임스탬프를 첫 값이 0이 되도록 보정(mp4-muxer 권장 옵션).
+      firstTimestampBehavior: 'offset',
     });
     vSamples.forEach((s, i) => {
       muxer.addVideoChunkRaw(
