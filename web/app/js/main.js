@@ -106,6 +106,8 @@ $('video').addEventListener('timeupdate', () => {
   }
 });
 
+$('analyze').addEventListener('click', analyze);
+
 // ---------- 내보내기 ----------
 function csvBlob() {
   return new Blob([writeCutsCsv(segments)], { type: 'text/csv' });
