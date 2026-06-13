@@ -101,7 +101,9 @@ export async function snapCut(file, { startSec = 5, endSec = 20, log }) {
         await aSrc.add(
           new mb.EncodedPacket(s.data, 'key', ts, s.duration / s.timescale, ai),
           ai === 0 ? { decoderConfig: {
-            codec: aTrack.codec,
+            // .MOV는 aTrack.codec이 'mp4a'(프로필 없음) — mediabunny는 유효 AAC 코덱
+            // 문자열을 요구하므로 합성 ASC의 AOT로 'mp4a.40.<aot>' 구성.
+            codec: aTrack.codec.includes('.') ? aTrack.codec : 'mp4a.40.' + (aacCfg[0] >> 3),
             sampleRate: aTrack.audio.sample_rate,
             numberOfChannels: aTrack.audio.channel_count,
             ...(aacCfg ? { description: aacCfg } : {}),

@@ -20,12 +20,23 @@ export function trackDescription(mp4file, trackId) {
   return null;
 }
 
-// AAC AudioSpecificConfig (esds → DecoderSpecificInfo)
+// AAC AudioSpecificConfig (esds → DecoderSpecificInfo).
+// 아이폰 .MOV(QuickTime)는 mp4box가 mp4a 밑 esds를 못 파싱 → samplerate/channel_count로
+// AAC-LC ASC 합성(아이폰 카메라는 AAC-LC). web/app/js/demux.js와 동일.
+const AAC_SR_INDEX = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050,
+                      16000, 12000, 11025, 8000, 7350];
 export function audioSpecificConfig(mp4file, trackId) {
+  const trak = mp4file.getTrackById(trackId);
+  const entry = trak && trak.mdia.minf.stbl.stsd.entries[0];
   try {
-    const trak = mp4file.getTrackById(trackId);
-    const esds = trak.mdia.minf.stbl.stsd.entries[0].esds;
-    return esds.esd.descs[0].descs[0].data || null;
+    const data = entry.esds.esd.descs[0].descs[0].data;
+    if (data && data.length >= 2) return data;
+  } catch { /* esds 미파싱 → 합성 폴백 */ }
+  try {
+    const sfIdx = AAC_SR_INDEX.indexOf(Math.round(entry.samplerate));
+    if (sfIdx < 0) return null;
+    const ch = entry.channel_count || 2;
+    return new Uint8Array([(2 << 3) | (sfIdx >> 1), ((sfIdx & 1) << 7) | (ch << 3)]);
   } catch {
     return null;
   }
