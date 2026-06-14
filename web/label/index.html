@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>rally-cut 스윙 라벨러</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { font-family: -apple-system, system-ui, sans-serif; margin: 0; padding: 10px;
+         max-width: 640px; margin-inline: auto; font-size: 16px;
+         padding-bottom: env(safe-area-inset-bottom); }
+  h1 { font-size: 1.1em; margin: 4px 0 8px; }
+  h1 small { font-weight: 400; opacity: .6; }
+  video { width: 100%; border-radius: 10px; background: #000; max-height: 38vh;
+          position: sticky; top: 0; z-index: 5; }
+  .row { display: flex; gap: 8px; align-items: center; margin: 8px 0; flex-wrap: wrap; }
+  button { font-size: 16px; padding: 10px 16px; border-radius: 10px;
+           border: 1px solid #8886; background: #2563eb; color: #fff; }
+  button:disabled { opacity: .4; }
+  button.aux { background: #6b7280; }
+  input[type=file] { font-size: 14px; max-width: 100%; }
+  #status { font-size: 14px; opacity: .85; min-height: 1.3em; margin: 6px 0; }
+  #summary { font-size: 14px; font-weight: 600; margin: 6px 0; }
+  ul { list-style: none; padding: 0; margin: 8px 0; }
+  li { border: 1px solid #8884; border-radius: 10px; margin-bottom: 8px; padding: 8px; }
+  li.active { border-color: #2563eb; border-width: 2px; }
+  li.done { background: #16a34a14; }
+  .clip { cursor: pointer; font-weight: 600; padding: 4px 2px; }
+  .clip .dur { opacity: .6; margin-left: 8px; font-size: 14px; font-weight: 400; }
+  .cls { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 8px; }
+  .cls button { font-size: 14px; padding: 9px 0; background: #374151; }
+  .cls button.sel { background: #16a34a; border-color: #16a34a; }
+  .cls button.skip.sel { background: #b45309; border-color: #b45309; }
+</style>
+</head>
+<body>
+<h1>rally-cut <small>스윙 라벨러 — 클립마다 동작 선택</small></h1>
+
+<input id="file" type="file" accept="video/*">
+<video id="video" controls playsinline muted hidden></video>
+
+<div class="row">
+  <button id="analyze" disabled>후보 추출</button>
+  <span id="summary"></span>
+</div>
+<div id="status"></div>
+
+<ul id="list"></ul>
+
+<div id="exportBar" class="row" hidden>
+  <button id="dl" class="aux">labels.csv 다운로드</button>
+  <button id="share" class="aux">공유</button>
+  <button id="copy" class="aux">복사</button>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/mp4box@0.5.2/dist/mp4box.all.min.js"></script>
+<script type="module" src="js/main.js?v=1"></script>
+</body>
+</html>
