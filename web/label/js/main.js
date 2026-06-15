@@ -6,14 +6,17 @@
 import { initPose, wristSeries, wristSeriesPlayback, hasRVFC, resetPose } from './pose_mp.js?v=25';
 import { swingSpeed, speedPeaks } from './swing.js?v=25';
 
-const BUILD = 'v2.6';
+const BUILD = 'v2.7';
 // 클래스 (rally_cut/labeling.SWING_LABEL_CLASSES와 동일). 같은 버튼 재탭=해제.
+// 8클래스(F-ⓓ): 서브리턴=리턴준비 직후 첫 스윙, 리턴준비=상대 서브 대기 자세(속도피크 아님→희소).
 const CLASSES = [
   { key: 'serve', ko: '서브' },
   { key: 'serve_under', ko: '언더' },
   { key: 'fh', ko: 'FH' },
   { key: 'bh', ko: 'BH' },
   { key: 'volley', ko: '발리' },
+  { key: 'serve_return', ko: '서브리턴' },
+  { key: 'return_ready', ko: '리턴준비' },
   { key: 'nostroke', ko: '무(노스윙)' },
 ];
 const HALF = 0.8;       // 후보 클립 반폭(초)
