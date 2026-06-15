@@ -17,7 +17,8 @@
   button.aux { background: #6b7280; }
   button:disabled { opacity: .4; }
   video { display: none; }
-  canvas { width: 100%; border-radius: 8px; background: #000; touch-action: none; cursor: crosshair; }
+  canvas { width: 100%; border-radius: 8px; background: #000; touch-action: none; cursor: crosshair;
+           user-select: none; -webkit-user-select: none; }
   #status { font-size: 14px; min-height: 1.3em; margin: 6px 0; }
   #next { font-weight: 700; color: #f59e0b; }
   #out { width: 100%; min-height: 4em; font-family: monospace; font-size: 13px; }
@@ -25,44 +26,48 @@
 </style>
 </head>
 <body>
-<h1>rally-cut <small>코트 4귀 피커 — court.json 생성</small></h1>
+<h1>rally-cut <small>코트 4귀 피커 — court.json (드래그·줌)</small></h1>
 
 <input id="file" type="file" accept="video/*">
 <div class="row">
   <button id="grab" disabled>현재 프레임 찍기</button>
   <button id="reset" class="aux" disabled>초기화</button>
+  <button id="fit" class="aux" disabled>줌 리셋</button>
   <span id="status">영상을 선택하세요.</span>
 </div>
 <ol>
-  <li>영상 재생/탐색으로 <b>코트 라인이 잘 보이는 프레임</b>에서 [현재 프레임 찍기]</li>
-  <li>아래 순서로 4귀 클릭: <span id="next"></span></li>
-  <li>네 귀 다 찍으면 court.json 내보내기</li>
+  <li>코트 라인 잘 보이는 프레임에서 [현재 프레임 찍기]</li>
+  <li>4귀 탭으로 찍기: <span id="next"></span></li>
+  <li><b>점을 드래그</b>해 미세조정 · <b>두 손가락 핀치</b>(또는 마우스 휠)로 확대 · 빈 곳 드래그=이동</li>
+  <li>정확히 맞추면 court.json 내보내기</li>
 </ol>
 <video id="video" controls playsinline muted></video>
-<canvas id="cv" width="960" height="540"></canvas>
+<canvas id="cv" width="1280" height="720"></canvas>
 
 <div class="row" id="exportBar" hidden>
   <button id="dl" class="aux">court.json 다운로드</button>
   <button id="copy" class="aux">복사</button>
   <button id="share" class="aux">공유</button>
 </div>
-<textarea id="out" readonly placeholder="네 귀를 다 찍으면 여기에 court.json이 나옵니다."></textarea>
+<textarea id="out" readonly placeholder="네 귀를 다 찍으면 court.json이 여기에 나옵니다."></textarea>
 
 <script>
 const $ = (id) => document.getElementById(id);
 const ORDER = [
-  { key: 'near_left',  ko: '① 근거리(하단) 좌측 베이스라인 코너' },
-  { key: 'near_right', ko: '② 근거리(하단) 우측 베이스라인 코너' },
-  { key: 'far_left',   ko: '③ 원거리(상단) 좌측 베이스라인 코너' },
-  { key: 'far_right',  ko: '④ 원거리(상단) 우측 베이스라인 코너' },
+  { key: 'near_left',  ko: '① 근거리(하단) 좌측 코너' },
+  { key: 'near_right', ko: '② 근거리(하단) 우측 코너' },
+  { key: 'far_left',   ko: '③ 원거리(상단) 좌측 코너' },
+  { key: 'far_right',  ko: '④ 원거리(상단) 우측 코너' },
 ];
 const cv = $('cv'), ctx = cv.getContext('2d');
-let videoFile = null, natW = 0, natH = 0, pts = [];
+let videoFile = null, natW = 0, natH = 0;
+let frame = null;                 // 캡처된 프레임(offscreen, 원본해상도)
+let pts = [];                     // 이미지(원본 픽셀) 좌표
+let view = { scale: 1, tx: 0, ty: 0 }, fitScale = 1;
 
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 function status(m) { $('status').textContent = m; }
-function nextLabel() {
-  $('next').textContent = pts.length < 4 ? ORDER[pts.length].ko : '완료 ✓';
-}
+function nextLabel() { $('next').textContent = pts.length < 4 ? ORDER[pts.length].ko : '완료 ✓ (드래그로 미세조정)'; }
 
 $('file').addEventListener('change', (e) => {
   videoFile = e.target.files[0] || null;
@@ -70,73 +75,135 @@ $('file').addEventListener('change', (e) => {
   const v = $('video');
   v.src = URL.createObjectURL(videoFile);
   v.style.display = 'block';
-  v.onloadedmetadata = () => { natW = v.videoWidth; natH = v.videoHeight;
+  v.onloadedmetadata = () => {
+    natW = v.videoWidth; natH = v.videoHeight;
     status(`${videoFile.name} (${natW}x${natH}) — 프레임 찾고 [현재 프레임 찍기]`);
-    $('grab').disabled = false; };
+    $('grab').disabled = false;
+  };
 });
 
 $('grab').addEventListener('click', () => {
   const v = $('video');
-  cv.width = natW; cv.height = natH;            // 캔버스를 원본 해상도로 → 클릭=원본 픽셀
-  ctx.drawImage(v, 0, 0, natW, natH);
+  frame = document.createElement('canvas'); frame.width = natW; frame.height = natH;
+  frame.getContext('2d').drawImage(v, 0, 0, natW, natH);
   v.style.display = 'none';
-  pts = []; redraw(); $('reset').disabled = false;
-  status('코트 라인 위 4귀를 순서대로 클릭하세요.'); nextLabel();
+  cv.width = 1280; cv.height = Math.round(1280 * natH / natW);
+  fitView();
+  pts = []; $('reset').disabled = false; $('fit').disabled = false;
+  status('4귀를 탭하세요. 점 드래그=미세조정, 핀치/휠=확대.'); nextLabel(); render();
 });
 
-function canvasXY(ev) {
+function fitView() { fitScale = cv.width / natW; view = { scale: fitScale, tx: 0, ty: 0 }; }
+$('fit').addEventListener('click', () => { fitView(); render(); });
+
+// ---- 좌표 변환 ----
+function toCanvas(ev) {
   const r = cv.getBoundingClientRect();
-  const p = ev.touches ? ev.touches[0] : ev;
-  return { x: (p.clientX - r.left) / r.width * cv.width,
-           y: (p.clientY - r.top) / r.height * cv.height };
+  return { cx: (ev.clientX - r.left) / r.width * cv.width, cy: (ev.clientY - r.top) / r.height * cv.height };
 }
+const toImg = (cx, cy) => ({ x: (cx - view.tx) / view.scale, y: (cy - view.ty) / view.scale });
 
-function addPoint(ev) {
-  ev.preventDefault();
-  if (!natW || pts.length >= 4) return;
-  const { x, y } = canvasXY(ev);
-  pts.push([Math.round(x), Math.round(y)]);
-  redraw(); nextLabel();
-  if (pts.length === 4) finish();
-}
-cv.addEventListener('click', addPoint);
-cv.addEventListener('touchstart', addPoint, { passive: false });
-
-function redraw() {
-  const v = $('video');
-  if (v.readyState >= 2) ctx.drawImage(v, 0, 0, cv.width, cv.height);
-  // 점
-  ctx.fillStyle = '#ff3b30';
-  pts.forEach(([x, y], i) => {
-    ctx.beginPath(); ctx.arc(x, y, Math.max(6, cv.width / 160), 0, 7); ctx.fill();
-    ctx.fillStyle = '#fff'; ctx.font = `${Math.max(18, cv.width / 50)}px sans-serif`;
-    ctx.fillText(String(i + 1), x + 10, y - 10); ctx.fillStyle = '#ff3b30';
-  });
-  // 폴리곤(시계: NL→NR→FR→FL)
+function render() {
+  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, cv.width, cv.height);
+  if (!frame) return;
+  ctx.setTransform(view.scale, 0, 0, view.scale, view.tx, view.ty);
+  ctx.imageSmoothingEnabled = true; ctx.drawImage(frame, 0, 0);
+  const r = 9 / view.scale, lw = 2.5 / view.scale;
   if (pts.length === 4) {
     const o = [pts[0], pts[1], pts[3], pts[2]];
-    ctx.strokeStyle = '#ffff00'; ctx.lineWidth = Math.max(3, cv.width / 320);
+    ctx.strokeStyle = '#ffff00'; ctx.lineWidth = lw;
     ctx.beginPath(); ctx.moveTo(o[0][0], o[0][1]);
     o.slice(1).forEach(p => ctx.lineTo(p[0], p[1])); ctx.closePath(); ctx.stroke();
   }
+  pts.forEach(([x, y], i) => {
+    ctx.beginPath(); ctx.arc(x, y, r, 0, 7);
+    ctx.fillStyle = (i === dragIdx) ? '#22c55e' : '#ff3b30'; ctx.fill();
+    ctx.lineWidth = lw; ctx.strokeStyle = '#fff'; ctx.stroke();
+    ctx.fillStyle = '#fff'; ctx.font = `${14 / view.scale}px sans-serif`;
+    ctx.fillText(String(i + 1), x + r, y - r);
+  });
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
 }
 
-function courtJson() {
-  const d = {}; ORDER.forEach((c, i) => d[c.key] = pts[i]); return d;
+// ---- 포인터(드래그/탭/팬/핀치) ----
+const ptrs = new Map();
+let mode = null, dragIdx = -1, down = null, moved = false, pinch = null;
+const dist = (a, b) => Math.hypot(a.cx - b.cx, a.cy - b.cy);
+
+function nearestPoint(img, rImg) {
+  let best = -1, bd = rImg;
+  pts.forEach(([x, y], i) => { const d = Math.hypot(x - img.x, y - img.y); if (d < bd) { bd = d; best = i; } });
+  return best;
 }
+
+cv.addEventListener('pointerdown', (e) => {
+  if (!frame) return;
+  cv.setPointerCapture(e.pointerId);
+  const { cx, cy } = toCanvas(e); ptrs.set(e.pointerId, { cx, cy });
+  if (ptrs.size === 2) {
+    const [a, b] = [...ptrs.values()];
+    const mid = { cx: (a.cx + b.cx) / 2, cy: (a.cy + b.cy) / 2 };
+    pinch = { baseDist: dist(a, b) || 1, baseScale: view.scale, midImg: toImg(mid.cx, mid.cy) };
+    mode = 'pinch'; dragIdx = -1; render(); return;
+  }
+  moved = false; down = { cx, cy };
+  dragIdx = nearestPoint(toImg(cx, cy), 16 / view.scale);
+  mode = dragIdx >= 0 ? 'drag' : 'maybe';
+  render();
+});
+
+cv.addEventListener('pointermove', (e) => {
+  if (!ptrs.has(e.pointerId)) return;
+  const { cx, cy } = toCanvas(e); const prev = ptrs.get(e.pointerId); ptrs.set(e.pointerId, { cx, cy });
+  if (mode === 'pinch' && ptrs.size >= 2) {
+    const [a, b] = [...ptrs.values()];
+    const mid = { cx: (a.cx + b.cx) / 2, cy: (a.cy + b.cy) / 2 };
+    view.scale = clamp(pinch.baseScale * dist(a, b) / pinch.baseDist, fitScale * 0.5, fitScale * 30);
+    view.tx = mid.cx - pinch.midImg.x * view.scale;
+    view.ty = mid.cy - pinch.midImg.y * view.scale;
+    render(); return;
+  }
+  if (mode === 'drag') {
+    const img = toImg(cx, cy);
+    pts[dragIdx] = [clamp(img.x, 0, natW), clamp(img.y, 0, natH)];
+    moved = true; render(); if (pts.length === 4) writeOut(); return;
+  }
+  if (mode === 'maybe' && Math.hypot(cx - down.cx, cy - down.cy) > 6) { mode = 'pan'; moved = true; }
+  if (mode === 'pan') { view.tx += cx - prev.cx; view.ty += cy - prev.cy; render(); }
+});
+
+function endPointer(e) {
+  if (mode === 'maybe' && !moved && pts.length < 4) {
+    const img = toImg(down.cx, down.cy);
+    pts.push([Math.round(clamp(img.x, 0, natW)), Math.round(clamp(img.y, 0, natH))]);
+    nextLabel(); if (pts.length === 4) finish();
+  }
+  ptrs.delete(e.pointerId);
+  if (ptrs.size < 2 && mode === 'pinch') mode = ptrs.size === 1 ? 'pan' : null;
+  if (ptrs.size === 0) { mode = null; dragIdx = -1; }
+  render();
+}
+cv.addEventListener('pointerup', endPointer);
+cv.addEventListener('pointercancel', endPointer);
+
+cv.addEventListener('wheel', (e) => {
+  if (!frame) return; e.preventDefault();
+  const { cx, cy } = toCanvas(e); const ix = (cx - view.tx) / view.scale, iy = (cy - view.ty) / view.scale;
+  view.scale = clamp(view.scale * (e.deltaY < 0 ? 1.15 : 1 / 1.15), fitScale * 0.5, fitScale * 30);
+  view.tx = cx - ix * view.scale; view.ty = cy - iy * view.scale; render();
+}, { passive: false });
+
+// ---- 내보내기 ----
+function courtJson() { const d = {}; ORDER.forEach((c, i) => d[c.key] = pts[i]); return d; }
 function jsonText() { return JSON.stringify(courtJson()); }
-function fname() {
-  return 'court_' + (videoFile.name.replace(/\.[^.]+$/, '') || 'video') + '.json';
-}
-function finish() {
-  $('out').value = jsonText();
-  $('exportBar').hidden = false;
-  status('완료 — court.json을 내보내 Claude에게 주세요. (수정하려면 초기화)');
-}
+function fname() { return 'court_' + (videoFile.name.replace(/\.[^.]+$/, '') || 'video') + '.json'; }
+function writeOut() { $('out').value = jsonText(); }
+function finish() { writeOut(); $('exportBar').hidden = false; status('드래그/줌으로 미세조정 후 내보내세요.'); }
 
-$('reset').addEventListener('click', () => { pts = []; redraw(); nextLabel();
-  $('exportBar').hidden = true; $('out').value = ''; status('다시 4귀를 클릭하세요.'); });
-
+$('reset').addEventListener('click', () => {
+  pts = []; dragIdx = -1; $('exportBar').hidden = true; $('out').value = '';
+  status('다시 4귀를 탭하세요.'); nextLabel(); render();
+});
 $('dl').addEventListener('click', () => {
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([jsonText()], { type: 'application/json' }));
@@ -148,9 +215,8 @@ $('copy').addEventListener('click', async () => {
 });
 $('share').addEventListener('click', async () => {
   const f = new File([jsonText()], fname(), { type: 'application/json' });
-  if (navigator.canShare && navigator.canShare({ files: [f] })) {
-    try { await navigator.share({ files: [f] }); } catch {}
-  } else status('공유 미지원 — 다운로드/복사 사용.');
+  if (navigator.canShare && navigator.canShare({ files: [f] })) { try { await navigator.share({ files: [f] }); } catch {} }
+  else status('공유 미지원 — 다운로드/복사 사용.');
 });
 nextLabel();
 </script>
