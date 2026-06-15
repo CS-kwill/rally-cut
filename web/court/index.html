@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>rally-cut 코트 피커</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, system-ui, sans-serif; margin: 0; padding: 10px;
+         max-width: 900px; margin-inline: auto; font-size: 16px; }
+  h1 { font-size: 1.1em; margin: 4px 0 8px; }
+  h1 small { font-weight: 400; opacity: .6; }
+  .row { display: flex; gap: 8px; align-items: center; margin: 8px 0; flex-wrap: wrap; }
+  button { font-size: 15px; padding: 9px 14px; border-radius: 9px; border: 1px solid #8886;
+           background: #2563eb; color: #fff; }
+  button.aux { background: #6b7280; }
+  button:disabled { opacity: .4; }
+  video { display: none; }
+  canvas { width: 100%; border-radius: 8px; background: #000; touch-action: none; cursor: crosshair; }
+  #status { font-size: 14px; min-height: 1.3em; margin: 6px 0; }
+  #next { font-weight: 700; color: #f59e0b; }
+  #out { width: 100%; min-height: 4em; font-family: monospace; font-size: 13px; }
+  ol { font-size: 13px; opacity: .85; margin: 6px 0; padding-left: 1.2em; }
+</style>
+</head>
+<body>
+<h1>rally-cut <small>코트 4귀 피커 — court.json 생성</small></h1>
+
+<input id="file" type="file" accept="video/*">
+<div class="row">
+  <button id="grab" disabled>현재 프레임 찍기</button>
+  <button id="reset" class="aux" disabled>초기화</button>
+  <span id="status">영상을 선택하세요.</span>
+</div>
+<ol>
+  <li>영상 재생/탐색으로 <b>코트 라인이 잘 보이는 프레임</b>에서 [현재 프레임 찍기]</li>
+  <li>아래 순서로 4귀 클릭: <span id="next"></span></li>
+  <li>네 귀 다 찍으면 court.json 내보내기</li>
+</ol>
+<video id="video" controls playsinline muted></video>
+<canvas id="cv" width="960" height="540"></canvas>
+
+<div class="row" id="exportBar" hidden>
+  <button id="dl" class="aux">court.json 다운로드</button>
+  <button id="copy" class="aux">복사</button>
+  <button id="share" class="aux">공유</button>
+</div>
+<textarea id="out" readonly placeholder="네 귀를 다 찍으면 여기에 court.json이 나옵니다."></textarea>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const ORDER = [
+  { key: 'near_left',  ko: '① 근거리(하단) 좌측 베이스라인 코너' },
+  { key: 'near_right', ko: '② 근거리(하단) 우측 베이스라인 코너' },
+  { key: 'far_left',   ko: '③ 원거리(상단) 좌측 베이스라인 코너' },
+  { key: 'far_right',  ko: '④ 원거리(상단) 우측 베이스라인 코너' },
+];
+const cv = $('cv'), ctx = cv.getContext('2d');
+let videoFile = null, natW = 0, natH = 0, pts = [];
+
+function status(m) { $('status').textContent = m; }
+function nextLabel() {
+  $('next').textContent = pts.length < 4 ? ORDER[pts.length].ko : '완료 ✓';
+}
+
+$('file').addEventListener('change', (e) => {
+  videoFile = e.target.files[0] || null;
+  if (!videoFile) return;
+  const v = $('video');
+  v.src = URL.createObjectURL(videoFile);
+  v.style.display = 'block';
+  v.onloadedmetadata = () => { natW = v.videoWidth; natH = v.videoHeight;
+    status(`${videoFile.name} (${natW}x${natH}) — 프레임 찾고 [현재 프레임 찍기]`);
+    $('grab').disabled = false; };
+});
+
+$('grab').addEventListener('click', () => {
+  const v = $('video');
+  cv.width = natW; cv.height = natH;            // 캔버스를 원본 해상도로 → 클릭=원본 픽셀
+  ctx.drawImage(v, 0, 0, natW, natH);
+  v.style.display = 'none';
+  pts = []; redraw(); $('reset').disabled = false;
+  status('코트 라인 위 4귀를 순서대로 클릭하세요.'); nextLabel();
+});
+
+function canvasXY(ev) {
+  const r = cv.getBoundingClientRect();
+  const p = ev.touches ? ev.touches[0] : ev;
+  return { x: (p.clientX - r.left) / r.width * cv.width,
+           y: (p.clientY - r.top) / r.height * cv.height };
+}
+
+function addPoint(ev) {
+  ev.preventDefault();
+  if (!natW || pts.length >= 4) return;
+  const { x, y } = canvasXY(ev);
+  pts.push([Math.round(x), Math.round(y)]);
+  redraw(); nextLabel();
+  if (pts.length === 4) finish();
+}
+cv.addEventListener('click', addPoint);
+cv.addEventListener('touchstart', addPoint, { passive: false });
+
+function redraw() {
+  const v = $('video');
+  if (v.readyState >= 2) ctx.drawImage(v, 0, 0, cv.width, cv.height);
+  // 점
+  ctx.fillStyle = '#ff3b30';
+  pts.forEach(([x, y], i) => {
+    ctx.beginPath(); ctx.arc(x, y, Math.max(6, cv.width / 160), 0, 7); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.font = `${Math.max(18, cv.width / 50)}px sans-serif`;
+    ctx.fillText(String(i + 1), x + 10, y - 10); ctx.fillStyle = '#ff3b30';
+  });
+  // 폴리곤(시계: NL→NR→FR→FL)
+  if (pts.length === 4) {
+    const o = [pts[0], pts[1], pts[3], pts[2]];
+    ctx.strokeStyle = '#ffff00'; ctx.lineWidth = Math.max(3, cv.width / 320);
+    ctx.beginPath(); ctx.moveTo(o[0][0], o[0][1]);
+    o.slice(1).forEach(p => ctx.lineTo(p[0], p[1])); ctx.closePath(); ctx.stroke();
+  }
+}
+
+function courtJson() {
+  const d = {}; ORDER.forEach((c, i) => d[c.key] = pts[i]); return d;
+}
+function jsonText() { return JSON.stringify(courtJson()); }
+function fname() {
+  return 'court_' + (videoFile.name.replace(/\.[^.]+$/, '') || 'video') + '.json';
+}
+function finish() {
+  $('out').value = jsonText();
+  $('exportBar').hidden = false;
+  status('완료 — court.json을 내보내 Claude에게 주세요. (수정하려면 초기화)');
+}
+
+$('reset').addEventListener('click', () => { pts = []; redraw(); nextLabel();
+  $('exportBar').hidden = true; $('out').value = ''; status('다시 4귀를 클릭하세요.'); });
+
+$('dl').addEventListener('click', () => {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([jsonText()], { type: 'application/json' }));
+  a.download = fname(); a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 20000);
+});
+$('copy').addEventListener('click', async () => {
+  try { await navigator.clipboard.writeText(jsonText()); status('복사 완료.'); }
+  catch { $('out').select(); document.execCommand('copy'); status('복사 완료(폴백).'); }
+});
+$('share').addEventListener('click', async () => {
+  const f = new File([jsonText()], fname(), { type: 'application/json' });
+  if (navigator.canShare && navigator.canShare({ files: [f] })) {
+    try { await navigator.share({ files: [f] }); } catch {}
+  } else status('공유 미지원 — 다운로드/복사 사용.');
+});
+nextLabel();
+</script>
+</body>
+</html>
