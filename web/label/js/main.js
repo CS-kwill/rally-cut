@@ -1,12 +1,12 @@
-// rally-cut 스윙 라벨러 — 오디오 온셋으로 후보 클립 추출 → 클립마다 동작 클래스 선택.
-// 출력 labels.csv(id,t,label)는 scripts/swing_label_collect.py에 넣어 pose 추출+라벨 합류.
-// 기존 웹앱(web/app) 분석 코드 재사용(audio/dsp/segments) — 같은 오디오 파이프라인.
-import { extractAudio } from '../../app/js/audio.js?v=2';
-import { detectHits } from '../../app/js/dsp.js?v=2';
-import { shortTc } from '../../app/js/segments.js?v=2';
+// rally-cut 스윙 라벨러 V2 — 포즈(손목속도 피크)로 스윙 후보 검출 → 클립마다 동작 선택.
+// V2 핵심: 오디오 추출 완전 배제. v1은 오디오 온셋으로 1.6초마다 무지성 후보였음 →
+// V2는 MediaPipe pose로 영상을 훑어 실제 스윙(손목속도 피크)만 후보로.
+// 출력 labels.csv(id,t,label)는 scripts/swing_label_collect.py(times.csv 모드)로 합류.
+import { initPose, wristSeries } from './pose_mp.js';
+import { swingSpeed, speedPeaks } from './swing.js';
 
-const BUILD = 'v1';
-// 클래스 (rally_cut/labeling.SWING_LABEL_CLASSES와 동일). skip=라벨 해제.
+const BUILD = 'v2';
+// 클래스 (rally_cut/labeling.SWING_LABEL_CLASSES와 동일). 같은 버튼 재탭=해제.
 const CLASSES = [
   { key: 'serve', ko: '서브' },
   { key: 'serve_under', ko: '언더' },
@@ -15,60 +15,57 @@ const CLASSES = [
   { key: 'volley', ko: '발리' },
   { key: 'nostroke', ko: '무(노스윙)' },
 ];
-const HALF = 0.8; // 후보 클립 반폭(초)
+const HALF = 0.8;       // 후보 클립 반폭(초)
+const STRIDE = 0.1;     // pose 샘플 간격(초) = 10fps
+const PCTL = 85;        // 속도 피크 임계 백분위 (hit_events 기본과 동일)
+const MINSEP = 0.6;     // 피크 최소 간격(초) — 한 스윙 중복 후보 방지
 
 const $ = (id) => document.getElementById(id);
 let videoFile = null;
-let cands = [];        // {t}
+let cands = [];        // {id, t}
 let labels = {};       // id -> class
 let playUntil = null;
 let activeRow = -1;
 
 function status(m) { $('status').textContent = m; }
 
-// 오디오 온셋 → 후보 시각 (collect.py auto와 동일: 구간 첫타격=서브후보 + 중간 샘플)
-function candidatesFromHits(hits, { maxGap = 3.0, minHits = 2 } = {}) {
-  const h = [...hits].sort((a, b) => a - b);
-  if (!h.length) return [];
-  const clusters = [[h[0]]];
-  for (const t of h.slice(1)) {
-    const cur = clusters[clusters.length - 1];
-    if (t - cur[cur.length - 1] <= maxGap) cur.push(t);
-    else clusters.push([t]);
-  }
-  const cand = [];
-  for (const c of clusters) {
-    if (c.length < minHits) continue;
-    cand.push(c[0]);
-    for (let i = 1; i < c.length; i += 3) cand.push(c[i]);
-  }
-  cand.sort((a, b) => a - b);
-  const out = [];
-  for (const t of cand) if (!out.length || t - out[out.length - 1] > 1.0) out.push(t);
-  return out;
+// 초 → m:ss (오디오 앱 의존 제거 — self-contained)
+function shortTc(s) {
+  const m = Math.floor(s / 60);
+  const sec = Math.floor(s % 60);
+  return `${m}:${String(sec).padStart(2, '0')}`;
+}
+
+function videoReady(v) {
+  if (v.readyState >= 1 && v.duration) return Promise.resolve();
+  return new Promise((r) => v.addEventListener('loadedmetadata', r, { once: true }));
 }
 
 async function analyze() {
   $('analyze').disabled = true;
+  const v = $('video');
   try {
-    status('오디오 추출 중…');
-    const x = await extractAudio(videoFile, {
-      log: (m) => status(m),
-      onProgress: (d, t) => status(`오디오 추출 중… ${Math.round(100 * d / t)}%`),
+    await videoReady(v);
+    status('MediaPipe 로딩 중…');
+    await initPose((m) => status(m));
+    status('포즈 검출 중… (영상 전체 훑기)');
+    const { series } = await wristSeries(v, {
+      strideSec: STRIDE,
+      onProgress: (t, dur) => status(`포즈 검출 중… ${Math.round(100 * t / dur)}% (${shortTc(t)}/${shortTc(dur)})`),
     });
-    status('타구음 검출 중…');
-    await new Promise((r) => setTimeout(r, 30));
-    const hits = detectHits(x);
-    const times = candidatesFromHits(hits);
+    if (!series.length) { status('근접 선수 포즈를 찾지 못했습니다. 영상/구도를 확인하세요.'); return; }
+    status('스윙 후보 계산 중…');
+    const { tm, sp } = swingSpeed(series, { maxDt: STRIDE * 3.5 });
+    const times = speedPeaks(tm, sp, { pctl: PCTL, minSep: MINSEP });
     cands = times.map((t, i) => ({ id: String(i + 1).padStart(4, '0'), t }));
     labels = {};
     renderList();
     $('exportBar').hidden = false;
     summarize();
-    status('클립을 탭해 재생하고, 아래 버튼으로 동작을 선택하세요.');
+    status(`스윙 후보 ${cands.length}개 (포즈 표본 ${series.length}). 클립을 탭해 재생하고 동작을 선택하세요.`);
   } catch (e) {
     console.error(e);
-    status('추출 실패: ' + e.message);
+    status('검출 실패: ' + (e && e.message || e));
   } finally {
     $('analyze').disabled = false;
   }
@@ -77,7 +74,7 @@ async function analyze() {
 function summarize() {
   const done = Object.keys(labels).length;
   const counts = {};
-  for (const v of Object.values(labels)) counts[v] = (counts[v] || 0) + 1;
+  for (const val of Object.values(labels)) counts[val] = (counts[val] || 0) + 1;
   const cs = CLASSES.map((c) => counts[c.key] ? `${c.ko}${counts[c.key]}` : null)
     .filter(Boolean).join(' ');
   $('summary').textContent = `후보 ${cands.length}개 · 라벨 ${done}개${cs ? ' (' + cs + ')' : ''}`;
@@ -189,4 +186,4 @@ window.addEventListener('unhandledrejection',
   const sm = document.querySelector('h1 small');
   if (sm) sm.textContent += ` · ${BUILD}`;
 }
-status(`영상 파일을 선택하세요. (build ${BUILD})`);
+status(`영상 파일을 선택하세요. (build ${BUILD}, 오디오 미사용·포즈 기반)`);
