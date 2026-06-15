@@ -1,11 +1,12 @@
-// rally-cut 스윙 라벨러 V2 — 포즈(손목속도 피크)로 스윙 후보 검출 → 클립마다 동작 선택.
-// V2 핵심: 오디오 추출 완전 배제. v1은 오디오 온셋으로 1.6초마다 무지성 후보였음 →
-// V2는 MediaPipe pose로 영상을 훑어 실제 스윙(손목속도 피크)만 후보로.
+// rally-cut 스윙 라벨러 V2 — 포즈(라켓헤드 속도 피크)로 스윙 후보 검출 → 클립마다 동작 선택.
+// V2 핵심: 오디오 추출 완전 배제. 스윙 = 라켓헤드가 빠르게 휘둘러지는 것(사용자 도메인 통찰).
+// 라켓은 pose에 없으므로 팔(팔꿈치→손목) 연장선으로 외삽, 어깨기준·신장정규화 상대속도 사용.
+// 스캔은 폰 역량 최대 활용(rVFC 재생 디코드, full 모델). 임계값은 슬라이더로 즉시 튜닝.
 // 출력 labels.csv(id,t,label)는 scripts/swing_label_collect.py(times.csv 모드)로 합류.
-import { initPose, wristSeries } from './pose_mp.js';
-import { swingSpeed, speedPeaks } from './swing.js';
+import { initPose, wristSeries, wristSeriesPlayback, hasRVFC, resetPose } from './pose_mp.js?v=22';
+import { swingSpeed, speedPeaks } from './swing.js?v=22';
 
-const BUILD = 'v2';
+const BUILD = 'v2.2';
 // 클래스 (rally_cut/labeling.SWING_LABEL_CLASSES와 동일). 같은 버튼 재탭=해제.
 const CLASSES = [
   { key: 'serve', ko: '서브' },
@@ -16,21 +17,22 @@ const CLASSES = [
   { key: 'nostroke', ko: '무(노스윙)' },
 ];
 const HALF = 0.8;       // 후보 클립 반폭(초)
-const STRIDE = 0.1;     // pose 샘플 간격(초) = 10fps
-const PCTL = 85;        // 속도 피크 임계 백분위 (hit_events 기본과 동일)
 const MINSEP = 0.6;     // 피크 최소 간격(초) — 한 스윙 중복 후보 방지
+const DEF_TH = 4.0;     // 라켓헤드 속도 임계 기본(신장/초) — 슬라이더로 튜닝
 
 const $ = (id) => document.getElementById(id);
 let videoFile = null;
-let cands = [];        // {id, t}
-let labels = {};       // id -> class
+let cands = [];          // {id, t, key}
+let labels = {};         // key(t.toFixed(2)) -> class (임계값 바꿔도 시각 일치하면 보존)
+let speedSeries = { tm: [], sp: [] }; // 스캔 캐시 — 임계값만 바꿔 즉시 재계산
+let threshold = DEF_TH;
 let playUntil = null;
 let activeRow = -1;
 
 function status(m) { $('status').textContent = m; }
 
-// 초 → m:ss (오디오 앱 의존 제거 — self-contained)
 function shortTc(s) {
+  if (!isFinite(s)) s = 0;
   const m = Math.floor(s / 60);
   const sec = Math.floor(s % 60);
   return `${m}:${String(sec).padStart(2, '0')}`;
@@ -44,40 +46,68 @@ function videoReady(v) {
 async function analyze() {
   $('analyze').disabled = true;
   const v = $('video');
+  const aborter = new AbortController();
+  let wake = null;
+  const onHide = () => { if (document.hidden) aborter.abort(); };
+  document.addEventListener('visibilitychange', onHide);
   try {
     await videoReady(v);
-    status('MediaPipe 로딩 중…');
+    try { wake = await navigator.wakeLock?.request('screen'); } catch { /* 미지원/거부 무시 */ }
+    status('MediaPipe(full) 로딩 중…');
     await initPose((m) => status(m));
-    status('포즈 검출 중… (영상 전체 훑기)');
-    const { series } = await wristSeries(v, {
-      strideSec: STRIDE,
-      onProgress: (t, dur) => status(`포즈 검출 중… ${Math.round(100 * t / dur)}% (${shortTc(t)}/${shortTc(dur)})`),
-    });
+    const mode = hasRVFC ? '재생 디코드' : 'seek';
+    status(`포즈 검출 중… (${mode})`);
+    const t0 = performance.now();
+    const onProgress = (t, dur, n) => {
+      const el = (performance.now() - t0) / 1000;
+      const eta = t > 0 ? el * (dur - t) / t : 0;
+      status(`포즈 검출 중(${mode})… ${Math.round(100 * t / dur)}% `
+        + `(${shortTc(t)}/${shortTc(dur)}, 표본 ${n}, 남은 ~${shortTc(eta)})`);
+    };
+    const scan = hasRVFC
+      ? wristSeriesPlayback(v, { rate: 4, signal: aborter.signal, onProgress })
+      : wristSeries(v, { strideSec: 0.067, signal: aborter.signal, onProgress });
+    const { series } = await scan;
+    v.playbackRate = 1; // 스캔용 배속 → 라벨 재생용 원복
     if (!series.length) { status('근접 선수 포즈를 찾지 못했습니다. 영상/구도를 확인하세요.'); return; }
-    status('스윙 후보 계산 중…');
-    const { tm, sp } = swingSpeed(series, { maxDt: STRIDE * 3.5 });
-    const times = speedPeaks(tm, sp, { pctl: PCTL, minSep: MINSEP });
-    cands = times.map((t, i) => ({ id: String(i + 1).padStart(4, '0'), t }));
+    speedSeries = swingSpeed(series); // 라켓헤드 상대속도(신장/초)
+    rebuildCandidates();
     labels = {};
-    renderList();
+    $('tuner').hidden = false;
     $('exportBar').hidden = false;
-    summarize();
-    status(`스윙 후보 ${cands.length}개 (포즈 표본 ${series.length}). 클립을 탭해 재생하고 동작을 선택하세요.`);
+    status(`포즈 표본 ${series.length}개. 슬라이더로 민감도를 맞춘 뒤, 클립을 탭해 동작을 선택하세요.`);
   } catch (e) {
     console.error(e);
-    status('검출 실패: ' + (e && e.message || e));
+    resetPose();
+    v.playbackRate = 1;
+    if (e && e.name === 'AbortError') {
+      status('화면이 꺼져 검출이 중단됐습니다. [포즈 검출]을 다시 누르세요. (자동잠금 방지 시도됨)');
+    } else {
+      status('검출 실패: ' + (e && e.message || e));
+    }
   } finally {
+    document.removeEventListener('visibilitychange', onHide);
+    try { await wake?.release(); } catch { /* noop */ }
     $('analyze').disabled = false;
   }
 }
 
+// 캐시된 속도 시계열에서 현재 임계값으로 후보 재계산 (pose 재스캔 없음 — 즉시).
+function rebuildCandidates() {
+  const times = speedPeaks(speedSeries.tm, speedSeries.sp, { minHeight: threshold, minSep: MINSEP });
+  cands = times.map((t, i) => ({ id: String(i + 1).padStart(4, '0'), t, key: t.toFixed(2) }));
+  renderList();
+  summarize();
+}
+
 function summarize() {
-  const done = Object.keys(labels).length;
+  const done = cands.filter((c) => labels[c.key]).length;
   const counts = {};
-  for (const val of Object.values(labels)) counts[val] = (counts[val] || 0) + 1;
+  for (const c of cands) if (labels[c.key]) counts[labels[c.key]] = (counts[labels[c.key]] || 0) + 1;
   const cs = CLASSES.map((c) => counts[c.key] ? `${c.ko}${counts[c.key]}` : null)
     .filter(Boolean).join(' ');
   $('summary').textContent = `후보 ${cands.length}개 · 라벨 ${done}개${cs ? ' (' + cs + ')' : ''}`;
+  $('sensval').textContent = `${threshold.toFixed(1)} → 후보 ${cands.length}개`;
 }
 
 function renderList() {
@@ -98,20 +128,20 @@ function renderList() {
     CLASSES.forEach((cl) => {
       const b = document.createElement('button');
       b.textContent = cl.ko;
-      if (labels[c.id] === cl.key) b.classList.add('sel');
+      if (labels[c.key] === cl.key) b.classList.add('sel');
       b.addEventListener('click', (e) => {
         e.stopPropagation();
-        if (labels[c.id] === cl.key) delete labels[c.id]; // 같은 버튼 재탭=해제
-        else labels[c.id] = cl.key;
-        li.classList.toggle('done', !!labels[c.id]);
+        if (labels[c.key] === cl.key) delete labels[c.key]; // 같은 버튼 재탭=해제
+        else labels[c.key] = cl.key;
+        li.classList.toggle('done', !!labels[c.key]);
         cls.querySelectorAll('button').forEach((x) => x.classList.remove('sel'));
-        if (labels[c.id]) b.classList.add('sel');
+        if (labels[c.key]) b.classList.add('sel');
         summarize();
       });
       cls.append(b);
     });
 
-    li.classList.toggle('done', !!labels[c.id]);
+    li.classList.toggle('done', !!labels[c.key]);
     li.append(clip, cls);
     ul.appendChild(li);
   });
@@ -123,6 +153,7 @@ function jumpPlay(i) {
   activeRow = i;
   $('list').children[i].classList.add('active');
   const t = cands[i].t;
+  v.playbackRate = 1;
   v.currentTime = Math.max(0, t - HALF);
   playUntil = t + HALF;
   v.play();
@@ -135,10 +166,16 @@ $('video').addEventListener('timeupdate', () => {
 
 $('analyze').addEventListener('click', analyze);
 
+// 민감도 슬라이더 — 임계값만 바꿔 즉시 후보 재계산(재스캔 없음).
+$('sens').addEventListener('input', (e) => {
+  threshold = parseFloat(e.target.value);
+  rebuildCandidates();
+});
+
 // ---- 내보내기 ----
 function csvText() {
   const lines = ['id,t,label'];
-  for (const c of cands) if (labels[c.id]) lines.push(`${c.id},${c.t.toFixed(2)},${labels[c.id]}`);
+  for (const c of cands) if (labels[c.key]) lines.push(`${c.id},${c.t.toFixed(2)},${labels[c.key]}`);
   return lines.join('\r\n') + '\r\n';
 }
 function csvBlob() { return new Blob([csvText()], { type: 'text/csv' }); }
@@ -171,12 +208,15 @@ $('copy').addEventListener('click', async () => {
 $('file').addEventListener('change', (e) => {
   videoFile = e.target.files[0] || null;
   if (!videoFile) return;
-  $('video').src = URL.createObjectURL(videoFile);
-  $('video').hidden = false;
+  const v = $('video');
+  v.src = URL.createObjectURL(videoFile);
+  v.hidden = false;
+  v.playbackRate = 1;
   $('analyze').disabled = false;
-  cands = []; labels = {}; $('list').innerHTML = '';
-  $('exportBar').hidden = true; $('summary').textContent = '';
-  status(`${videoFile.name} (${(videoFile.size / 1048576).toFixed(0)}MB) — [후보 추출]을 누르세요.`);
+  cands = []; labels = {}; speedSeries = { tm: [], sp: [] };
+  $('list').innerHTML = '';
+  $('tuner').hidden = true; $('exportBar').hidden = true; $('summary').textContent = '';
+  status(`${videoFile.name} (${(videoFile.size / 1048576).toFixed(0)}MB) — [포즈 검출]을 누르세요.`);
 });
 
 window.addEventListener('error', (e) => status('오류: ' + e.message));
@@ -186,4 +226,4 @@ window.addEventListener('unhandledrejection',
   const sm = document.querySelector('h1 small');
   if (sm) sm.textContent += ` · ${BUILD}`;
 }
-status(`영상 파일을 선택하세요. (build ${BUILD}, 오디오 미사용·포즈 기반)`);
+status(`영상 파일을 선택하세요. (build ${BUILD}, 오디오 미사용·라켓헤드 추정 기반)`);
