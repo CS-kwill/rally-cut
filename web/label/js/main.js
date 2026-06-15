@@ -3,10 +3,10 @@
 // 라켓은 pose에 없으므로 팔(팔꿈치→손목) 연장선으로 외삽, 어깨기준·신장정규화 상대속도 사용.
 // 스캔은 폰 역량 최대 활용(rVFC 재생 디코드, full 모델). 임계값은 슬라이더로 즉시 튜닝.
 // 출력 labels.csv(id,t,label)는 scripts/swing_label_collect.py(times.csv 모드)로 합류.
-import { initPose, wristSeries, wristSeriesPlayback, hasRVFC, resetPose } from './pose_mp.js?v=22';
-import { swingSpeed, speedPeaks } from './swing.js?v=22';
+import { initPose, wristSeries, wristSeriesPlayback, hasRVFC, resetPose } from './pose_mp.js?v=23';
+import { swingSpeed, speedPeaks } from './swing.js?v=23';
 
-const BUILD = 'v2.2';
+const BUILD = 'v2.3';
 // 클래스 (rally_cut/labeling.SWING_LABEL_CLASSES와 동일). 같은 버튼 재탭=해제.
 const CLASSES = [
   { key: 'serve', ko: '서브' },
@@ -24,8 +24,9 @@ const $ = (id) => document.getElementById(id);
 let videoFile = null;
 let cands = [];          // {id, t, key}
 let labels = {};         // key(t.toFixed(2)) -> class (임계값 바꿔도 시각 일치하면 보존)
-let speedSeries = { tm: [], sp: [] }; // 스캔 캐시 — 임계값만 바꿔 즉시 재계산
+let speedSeries = { tm: [], sp: [] }; // 스캔/로드 캐시 — 임계값만 바꿔 즉시 재계산
 let threshold = DEF_TH;
+let dataVideo = '';      // 로드한 JSON의 영상명(파일명 대조용)
 let playUntil = null;
 let activeRow = -1;
 
@@ -65,8 +66,8 @@ async function analyze() {
         + `(${shortTc(t)}/${shortTc(dur)}, 표본 ${n}, 남은 ~${shortTc(eta)})`);
     };
     const scan = hasRVFC
-      ? wristSeriesPlayback(v, { rate: 4, signal: aborter.signal, onProgress })
-      : wristSeries(v, { strideSec: 0.067, signal: aborter.signal, onProgress });
+      ? wristSeriesPlayback(v, { rate: 1.5, signal: aborter.signal, onProgress })
+      : wristSeries(v, { strideSec: 0.04, signal: aborter.signal, onProgress });
     const { series } = await scan;
     v.playbackRate = 1; // 스캔용 배속 → 라벨 재생용 원복
     if (!series.length) { status('근접 선수 포즈를 찾지 못했습니다. 영상/구도를 확인하세요.'); return; }
@@ -166,6 +167,38 @@ $('video').addEventListener('timeupdate', () => {
 
 $('analyze').addEventListener('click', analyze);
 
+// 오프디바이스 pose 결과(JSON) 불러오기 — 폰 검출 없이 후보+슬라이더 즉시.
+// JSON = {video, fps, dur, tm:[...], sp:[...]} (scripts/offdevice_pose.py 산출).
+function applySwingData(data) {
+  if (!data || !Array.isArray(data.tm) || !Array.isArray(data.sp) || data.tm.length !== data.sp.length) {
+    status('JSON 형식 오류: tm/sp 배열이 필요합니다.'); return;
+  }
+  speedSeries = { tm: data.tm, sp: data.sp };
+  dataVideo = data.video || '';
+  labels = {};
+  $('tuner').hidden = false;
+  $('exportBar').hidden = false;
+  rebuildCandidates();
+  let warn = '';
+  if (videoFile && dataVideo && !videoFile.name.toLowerCase().startsWith(dataVideo.toLowerCase().replace(/\.[^.]+$/, ''))) {
+    warn = ` ⚠ 영상(${videoFile.name})과 데이터(${dataVideo}) 이름이 다름 — 같은 영상인지 확인`;
+  } else if (!videoFile) {
+    warn = ' — 재생하려면 같은 영상도 선택하세요';
+  }
+  status(`스윙데이터 로드: 표본 ${data.sp.length}개 (${dataVideo || '?'}, ${data.dur || '?'}s). 슬라이더로 민감도 조절.${warn}`);
+}
+
+$('datafile').addEventListener('change', (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const rd = new FileReader();
+  rd.onload = () => {
+    try { applySwingData(JSON.parse(rd.result)); }
+    catch (err) { status('JSON 파싱 실패: ' + err.message); }
+  };
+  rd.readAsText(f);
+});
+
 // 민감도 슬라이더 — 임계값만 바꿔 즉시 후보 재계산(재스캔 없음).
 $('sens').addEventListener('input', (e) => {
   threshold = parseFloat(e.target.value);
@@ -180,7 +213,9 @@ function csvText() {
 }
 function csvBlob() { return new Blob([csvText()], { type: 'text/csv' }); }
 function csvName() {
-  return 'swinglabels_' + (videoFile.name.replace(/\.[^.]+$/, '') || 'video') + '.csv';
+  const base = (videoFile && videoFile.name.replace(/\.[^.]+$/, ''))
+    || (dataVideo && dataVideo.replace(/\.[^.]+$/, '')) || 'video';
+  return 'swinglabels_' + base + '.csv';
 }
 
 $('dl').addEventListener('click', () => {
@@ -213,10 +248,10 @@ $('file').addEventListener('change', (e) => {
   v.hidden = false;
   v.playbackRate = 1;
   $('analyze').disabled = false;
-  cands = []; labels = {}; speedSeries = { tm: [], sp: [] };
+  cands = []; labels = {}; speedSeries = { tm: [], sp: [] }; dataVideo = '';
   $('list').innerHTML = '';
   $('tuner').hidden = true; $('exportBar').hidden = true; $('summary').textContent = '';
-  status(`${videoFile.name} (${(videoFile.size / 1048576).toFixed(0)}MB) — [포즈 검출]을 누르세요.`);
+  status(`${videoFile.name} (${(videoFile.size / 1048576).toFixed(0)}MB) — 이제 [스윙데이터(JSON)]를 불러오세요.`);
 });
 
 window.addEventListener('error', (e) => status('오류: ' + e.message));
@@ -226,4 +261,4 @@ window.addEventListener('unhandledrejection',
   const sm = document.querySelector('h1 small');
   if (sm) sm.textContent += ` · ${BUILD}`;
 }
-status(`영상 파일을 선택하세요. (build ${BUILD}, 오디오 미사용·라켓헤드 추정 기반)`);
+status(`① 영상 선택 → ② 스윙데이터(JSON) 불러오기. (build ${BUILD}, 오프디바이스 pose)`);

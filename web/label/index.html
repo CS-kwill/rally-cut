@@ -42,7 +42,11 @@
 <video id="video" controls playsinline muted hidden></video>
 
 <div class="row">
-  <button id="analyze" disabled>포즈 검출 → 스윙 후보</button>
+  <label for="datafile" style="font-size:14px">스윙데이터(JSON)</label>
+  <input id="datafile" type="file" accept=".json,application/json">
+</div>
+<div class="row">
+  <button id="analyze" class="aux" disabled>또는 폰에서 직접 검출(느림)</button>
   <span id="summary"></span>
 </div>
 <div id="status"></div>
@@ -61,6 +65,6 @@
   <button id="copy" class="aux">복사</button>
 </div>
 
-<script type="module" src="js/main.js?v=4"></script>
+<script type="module" src="js/main.js?v=5"></script>
 </body>
 </html>

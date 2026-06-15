@@ -106,11 +106,12 @@ export async function wristSeries(video, { strideSec = 0.1, maxSec = 0, log, onP
 
 export const hasRVFC = 'requestVideoFrameCallback' in HTMLVideoElement.prototype;
 
-// 폰 역량 최대 활용 경로: 영상을 재생하며 requestVideoFrameCallback으로 디코드되는
-// 프레임마다 pose 추출(순차 HW 디코드 — seek보다 빠르고 고프레임). minDt로 과샘플만 제한.
-// rate=배속(브라우저가 클램프하면 그 값). seek 대비 ~native fps 샘플링.
+// 영상을 재생하며 requestVideoFrameCallback으로 디코드되는 프레임마다 pose 추출.
+// 주의(2026-06-15 실측): 배속이 높으면 추론(~30ms/full)이 못 따라가 내용 기준 샘플링이
+// 듬성해져 빠른 스윙(서브 컨택·발리 ~0.2s)이 샘플 사이로 빠진다. rate=1.5면 추론한계
+// (~내용 22fps)까지 촘촘 → 스윙 누락 방지. minDt는 상한만 둔다(추론이 더 빠르면 native까지).
 export async function wristSeriesPlayback(
-  video, { rate = 4, minDt = 1 / 30, log, onProgress, signal } = {}) {
+  video, { rate = 1.5, minDt = 1 / 50, log, onProgress, signal } = {}) {
   await initPose(log);
   const W = video.videoWidth, H = video.videoHeight;
   const dur = video.duration;
