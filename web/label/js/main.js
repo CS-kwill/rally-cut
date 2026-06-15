@@ -3,10 +3,10 @@
 // 라켓은 pose에 없으므로 팔(팔꿈치→손목) 연장선으로 외삽, 어깨기준·신장정규화 상대속도 사용.
 // 스캔은 폰 역량 최대 활용(rVFC 재생 디코드, full 모델). 임계값은 슬라이더로 즉시 튜닝.
 // 출력 labels.csv(id,t,label)는 scripts/swing_label_collect.py(times.csv 모드)로 합류.
-import { initPose, wristSeries, wristSeriesPlayback, hasRVFC, resetPose } from './pose_mp.js?v=24';
-import { swingSpeed, speedPeaks } from './swing.js?v=24';
+import { initPose, wristSeries, wristSeriesPlayback, hasRVFC, resetPose } from './pose_mp.js?v=25';
+import { swingSpeed, speedPeaks } from './swing.js?v=25';
 
-const BUILD = 'v2.4';
+const BUILD = 'v2.5';
 // 클래스 (rally_cut/labeling.SWING_LABEL_CLASSES와 동일). 같은 버튼 재탭=해제.
 const CLASSES = [
   { key: 'serve', ko: '서브' },
@@ -27,8 +27,12 @@ let labels = {};         // key(t.toFixed(2)) -> class (임계값 바꿔도 시�
 let speedSeries = { tm: [], sp: [] }; // 스캔/로드 캐시 — 임계값만 바꿔 즉시 재계산
 let threshold = DEF_TH;
 let dataVideo = '';      // 로드한 JSON의 영상명(파일명 대조용)
+let predsMap = {};       // key(t.toFixed(2)) -> {pred, conf, ns}  (모델 예측, predict_labels.py)
+let collapseTau = 0.95;  // ns>=tau 고신뢰 nostroke 자동 접기
+const LOWCONF = 0.6;     // conf<LOWCONF = 저신뢰(검수 권장 강조)
 let playUntil = null;
-let activeRow = -1;
+let rowEls = {};         // 후보 index -> li 엘리먼트 (접기 섹션 포함 점프용)
+let activeEl = null;
 
 function status(m) { $('status').textContent = m; }
 
@@ -96,63 +100,93 @@ async function analyze() {
 // 캐시된 속도 시계열에서 현재 임계값으로 후보 재계산 (pose 재스캔 없음 — 즉시).
 function rebuildCandidates() {
   const times = speedPeaks(speedSeries.tm, speedSeries.sp, { minHeight: threshold, minSep: MINSEP });
-  cands = times.map((t, i) => ({ id: String(i + 1).padStart(4, '0'), t, key: t.toFixed(2) }));
+  cands = times.map((t, i) => {
+    const key = t.toFixed(2);
+    const pr = predsMap[key];
+    return {
+      id: String(i + 1).padStart(4, '0'), t, key,
+      pred: pr ? pr.pred : null, conf: pr ? pr.conf : null, ns: pr ? pr.ns : null,
+      collapsed: !!(pr && pr.ns >= collapseTau),   // 고신뢰 nostroke → 접기
+    };
+  });
   renderList();
   summarize();
 }
 
+function koOf(key) { return (CLASSES.find((x) => x.key === key) || {}).ko || key; }
+
 function summarize() {
-  const done = cands.filter((c) => labels[c.key]).length;
-  const counts = {};
-  for (const c of cands) if (labels[c.key]) counts[labels[c.key]] = (counts[labels[c.key]] || 0) + 1;
-  const cs = CLASSES.map((c) => counts[c.key] ? `${c.ko}${counts[c.key]}` : null)
-    .filter(Boolean).join(' ');
-  $('summary').textContent = `후보 ${cands.length}개 · 라벨 ${done}개${cs ? ' (' + cs + ')' : ''}`;
-  $('sensval').textContent = `${threshold.toFixed(1)} → 후보 ${cands.length}개`;
+  const swing = cands.filter((c) => labels[c.key] && labels[c.key] !== 'nostroke').length;
+  const collapsed = cands.filter((c) => c.collapsed).length;
+  const low = cands.filter((c) => !c.collapsed && c.conf != null && c.conf < LOWCONF).length;
+  $('summary').textContent = `후보 ${cands.length} · 스윙 ${swing}`
+    + (collapsed ? ` · 접힘 ${collapsed}` : '') + (low ? ` · 저신뢰검수 ${low}` : '');
+  $('sensval').textContent = `${threshold.toFixed(1)} → 후보 ${cands.length}`;
+}
+
+// 후보 1개의 li 생성 (예측 뱃지·저신뢰 강조·예측 버튼 사전선택).
+function makeRow(c, i) {
+  const li = document.createElement('li');
+  li.dataset.i = i;
+  const low = c.conf != null && c.conf < LOWCONF;
+  if (low) li.classList.add('lowconf');
+
+  const clip = document.createElement('div');
+  clip.className = 'clip';
+  const badge = c.pred
+    ? `<span class="pred${low ? ' low' : ''}">예측 ${koOf(c.pred)}·${c.conf != null ? c.conf.toFixed(2) : '?'}${low ? ' ⚠' : ''}</span>`
+    : '';
+  clip.innerHTML = `<span>▶ #${i + 1}</span> ${shortTc(c.t)}`
+    + `<span class="dur">${(2 * HALF).toFixed(1)}s</span> ${badge}`;
+  clip.addEventListener('click', () => jumpPlay(i));
+
+  const cls = document.createElement('div');
+  cls.className = 'cls';
+  CLASSES.forEach((cl) => {
+    const b = document.createElement('button');
+    b.textContent = cl.ko;
+    if (labels[c.key] === cl.key) b.classList.add('sel');
+    b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (labels[c.key] === cl.key) delete labels[c.key];
+      else labels[c.key] = cl.key;
+      li.classList.toggle('done', !!labels[c.key]);
+      cls.querySelectorAll('button').forEach((x) => x.classList.remove('sel'));
+      if (labels[c.key] === cl.key) b.classList.add('sel');
+      summarize();
+    });
+    cls.append(b);
+  });
+  li.classList.toggle('done', !!labels[c.key]);
+  li.append(clip, cls);
+  rowEls[i] = li;
+  return li;
 }
 
 function renderList() {
   const ul = $('list');
   ul.innerHTML = '';
-  cands.forEach((c, i) => {
-    const li = document.createElement('li');
-    li.dataset.i = i;
-
-    const clip = document.createElement('div');
-    clip.className = 'clip';
-    clip.innerHTML = `<span>▶ #${i + 1}</span> ${shortTc(c.t)}`
-      + `<span class="dur">${(2 * HALF).toFixed(1)}s</span>`;
-    clip.addEventListener('click', () => jumpPlay(i));
-
-    const cls = document.createElement('div');
-    cls.className = 'cls';
-    CLASSES.forEach((cl) => {
-      const b = document.createElement('button');
-      b.textContent = cl.ko;
-      if (labels[c.key] === cl.key) b.classList.add('sel');
-      b.addEventListener('click', (e) => {
-        e.stopPropagation();
-        if (labels[c.key] === cl.key) delete labels[c.key]; // 같은 버튼 재탭=해제
-        else labels[c.key] = cl.key;
-        li.classList.toggle('done', !!labels[c.key]);
-        cls.querySelectorAll('button').forEach((x) => x.classList.remove('sel'));
-        if (labels[c.key]) b.classList.add('sel');
-        summarize();
-      });
-      cls.append(b);
-    });
-
-    li.classList.toggle('done', !!labels[c.key]);
-    li.append(clip, cls);
-    ul.appendChild(li);
-  });
+  rowEls = {};
+  cands.forEach((c, i) => { if (!c.collapsed) ul.appendChild(makeRow(c, i)); });
+  const collapsed = cands.filter((c) => c.collapsed);
+  if (collapsed.length) {
+    const det = document.createElement('details');
+    det.className = 'collapsed';
+    const sum = document.createElement('summary');
+    sum.textContent = `▸ 자동 접힌 고신뢰 nostroke ${collapsed.length}개 (펼쳐 확인)`;
+    det.appendChild(sum);
+    const inner = document.createElement('ul');
+    cands.forEach((c, i) => { if (c.collapsed) inner.appendChild(makeRow(c, i)); });
+    det.appendChild(inner);
+    ul.appendChild(det);
+  }
 }
 
 function jumpPlay(i) {
   const v = $('video');
-  if (activeRow >= 0) $('list').children[activeRow]?.classList.remove('active');
-  activeRow = i;
-  $('list').children[i].classList.add('active');
+  if (activeEl) activeEl.classList.remove('active');
+  activeEl = rowEls[i] || null;
+  if (activeEl) activeEl.classList.add('active');
   const t = cands[i].t;
   v.playbackRate = 1;
   v.currentTime = Math.max(0, t - HALF);
@@ -176,16 +210,28 @@ function applySwingData(data) {
   speedSeries = { tm: data.tm, sp: data.sp };
   dataVideo = data.video || '';
   labels = {};
+  predsMap = {};
+  collapseTau = (typeof data.collapse_tau === 'number') ? data.collapse_tau : 0.95;
+  // 모델 예측이 있으면 predsMap 구성 + 각 후보 라벨을 예측으로 사전채움(final=pred 기본).
+  if (Array.isArray(data.preds)) {
+    for (const p of data.preds) {
+      const k = Number(p.t).toFixed(2);
+      predsMap[k] = { pred: p.pred, conf: p.conf, ns: p.ns };
+      if (p.pred) labels[k] = p.pred;   // 사전선택
+    }
+  }
   $('tuner').hidden = false;
   $('exportBar').hidden = false;
   rebuildCandidates();
+  const npred = Object.keys(predsMap).length;
   let warn = '';
   if (videoFile && dataVideo && !videoFile.name.toLowerCase().startsWith(dataVideo.toLowerCase().replace(/\.[^.]+$/, ''))) {
-    warn = ` ⚠ 영상(${videoFile.name})과 데이터(${dataVideo}) 이름이 다름 — 같은 영상인지 확인`;
+    warn = ` ⚠ 영상(${videoFile.name})과 데이터(${dataVideo}) 이름이 다름`;
   } else if (!videoFile) {
     warn = ' — 재생하려면 같은 영상도 선택하세요';
   }
-  status(`스윙데이터 로드: 표본 ${data.sp.length}개 (${dataVideo || '?'}, ${data.dur || '?'}s). 슬라이더로 민감도 조절.${warn}`);
+  status(`로드: 표본 ${data.sp.length} (${dataVideo || '?'}, ${data.dur || '?'}s)`
+    + (npred ? ` · 모델예측 ${npred}개 사전선택됨` : ' · 예측 없음(수동)') + `.${warn}`);
 }
 
 $('datafile').addEventListener('change', (e) => {
@@ -206,9 +252,18 @@ $('sens').addEventListener('input', (e) => {
 });
 
 // ---- 내보내기 ----
+// 예측 있으면 round-trip(채점용): id,t,pred,conf,final. 없으면 기존 id,t,label.
 function csvText() {
-  const lines = ['id,t,label'];
-  for (const c of cands) if (labels[c.key]) lines.push(`${c.id},${c.t.toFixed(2)},${labels[c.key]}`);
+  const hasPred = Object.keys(predsMap).length > 0;
+  if (!hasPred) {
+    const lines = ['id,t,label'];
+    for (const c of cands) if (labels[c.key]) lines.push(`${c.id},${c.t.toFixed(2)},${labels[c.key]}`);
+    return lines.join('\r\n') + '\r\n';
+  }
+  const lines = ['id,t,pred,conf,final'];
+  for (const c of cands) {
+    lines.push(`${c.id},${c.t.toFixed(2)},${c.pred || ''},${c.conf != null ? c.conf : ''},${labels[c.key] || ''}`);
+  }
   return lines.join('\r\n') + '\r\n';
 }
 function csvBlob() { return new Blob([csvText()], { type: 'text/csv' }); }
