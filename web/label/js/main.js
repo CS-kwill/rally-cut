@@ -3,10 +3,10 @@
 // 라켓은 pose에 없으므로 팔(팔꿈치→손목) 연장선으로 외삽, 어깨기준·신장정규화 상대속도 사용.
 // 스캔은 폰 역량 최대 활용(rVFC 재생 디코드, full 모델). 임계값은 슬라이더로 즉시 튜닝.
 // 출력 labels.csv(id,t,label)는 scripts/swing_label_collect.py(times.csv 모드)로 합류.
-import { initPose, wristSeries, wristSeriesPlayback, hasRVFC, resetPose } from './pose_mp.js?v=23';
-import { swingSpeed, speedPeaks } from './swing.js?v=23';
+import { initPose, wristSeries, wristSeriesPlayback, hasRVFC, resetPose } from './pose_mp.js?v=24';
+import { swingSpeed, speedPeaks } from './swing.js?v=24';
 
-const BUILD = 'v2.3';
+const BUILD = 'v2.4';
 // 클래스 (rally_cut/labeling.SWING_LABEL_CLASSES와 동일). 같은 버튼 재탭=해제.
 const CLASSES = [
   { key: 'serve', ko: '서브' },
@@ -18,7 +18,7 @@ const CLASSES = [
 ];
 const HALF = 0.8;       // 후보 클립 반폭(초)
 const MINSEP = 0.6;     // 피크 최소 간격(초) — 한 스윙 중복 후보 방지
-const DEF_TH = 4.0;     // 라켓헤드 속도 임계 기본(신장/초) — 슬라이더로 튜닝
+const DEF_TH = 8.0;     // 라켓헤드 속도 임계 기본(신장/초) — 60fps 데이터 스케일, 슬라이더로 튜닝
 
 const $ = (id) => document.getElementById(id);
 let videoFile = null;
