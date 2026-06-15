@@ -35,10 +35,15 @@
   <button id="fit" class="aux" disabled>줌 리셋</button>
   <span id="status">영상을 선택하세요.</span>
 </div>
+<div class="row">
+  <label for="loadjson" style="font-size:13px">기존 court.json 불러와 수정(선택):</label>
+  <input id="loadjson" type="file" accept=".json,application/json" disabled>
+</div>
 <ol>
   <li>코트 라인 잘 보이는 프레임에서 [현재 프레임 찍기]</li>
   <li>4귀 탭으로 찍기: <span id="next"></span></li>
   <li><b>드래그 = 가장 가까운 귀 이동</b>(미세조정) · <b>두 손가락 핀치/마우스 휠 = 확대</b> · 두 손가락 = 화면 이동</li>
+  <li><b>코트 귀가 화면 밖이면</b>: 두 손가락으로 <b>축소</b>(검은 여백 생김) → 코트 라인 연장 교차점(화면 밖)으로 그 귀를 드래그</li>
   <li>정확히 맞추면 court.json 내보내기</li>
 </ol>
 <video id="video" controls playsinline muted></video>
@@ -90,7 +95,7 @@ $('grab').addEventListener('click', () => {
   cv.width = 1280; cv.height = Math.round(1280 * natH / natW);
   cv.style.display = 'block';
   fitView();
-  pts = []; $('reset').disabled = false; $('fit').disabled = false;
+  pts = []; $('reset').disabled = false; $('fit').disabled = false; $('loadjson').disabled = false;
   status('4귀를 탭하세요. 점 드래그=미세조정, 핀치/휠=확대.'); nextLabel(); render();
 });
 
@@ -159,7 +164,7 @@ cv.addEventListener('pointermove', (e) => {
   if (mode === 'pinch' && ptrs.size >= 2) {
     const [a, b] = [...ptrs.values()];
     const mid = { cx: (a.cx + b.cx) / 2, cy: (a.cy + b.cy) / 2 };
-    view.scale = clamp(pinch.baseScale * dist(a, b) / pinch.baseDist, fitScale * 0.5, fitScale * 30);
+    view.scale = clamp(pinch.baseScale * dist(a, b) / pinch.baseDist, fitScale * 0.25, fitScale * 30);
     view.tx = mid.cx - pinch.midImg.x * view.scale;
     view.ty = mid.cy - pinch.midImg.y * view.scale;
     render(); return;
@@ -169,18 +174,18 @@ cv.addEventListener('pointermove', (e) => {
     downMoved = true;
     if (grabIdx >= 0) { mode = 'drag'; dragIdx = grabIdx; }   // 팬 없음 — 가장 가까운 귀만 이동
   }
-  if (mode === 'drag') {                  // 상대 이동(점프 없음): 가장 가까운 귀만
+  if (mode === 'drag') {                  // 상대 이동(점프 없음): 가장 가까운 귀만. 화면 밖 허용.
     const a = toImg(prev.cx, prev.cy), b = toImg(cx, cy);
     const [px, py] = pts[dragIdx];
-    pts[dragIdx] = [clamp(px + (b.x - a.x), 0, natW), clamp(py + (b.y - a.y), 0, natH)];
+    pts[dragIdx] = [px + (b.x - a.x), py + (b.y - a.y)];
     render(); if (pts.length === 4) writeOut();
   }
 });
 
 function endPointer(e) {
-  if (mode === 'pending' && !downMoved && pts.length < 4) {   // 탭 → 귀 추가
+  if (mode === 'pending' && !downMoved && pts.length < 4) {   // 탭 → 귀 추가(화면 밖 허용)
     const img = toImg(down.cx, down.cy);
-    pts.push([Math.round(clamp(img.x, 0, natW)), Math.round(clamp(img.y, 0, natH))]);
+    pts.push([Math.round(img.x), Math.round(img.y)]);
     nextLabel(); if (pts.length === 4) finish();
   }
   ptrs.delete(e.pointerId);
@@ -197,7 +202,7 @@ cv.addEventListener('pointercancel', endPointer);
 cv.addEventListener('wheel', (e) => {
   if (!frame) return; e.preventDefault();
   const { cx, cy } = toCanvas(e); const ix = (cx - view.tx) / view.scale, iy = (cy - view.ty) / view.scale;
-  view.scale = clamp(view.scale * (e.deltaY < 0 ? 1.15 : 1 / 1.15), fitScale * 0.5, fitScale * 30);
+  view.scale = clamp(view.scale * (e.deltaY < 0 ? 1.15 : 1 / 1.15), fitScale * 0.25, fitScale * 30);
   view.tx = cx - ix * view.scale; view.ty = cy - iy * view.scale; render();
 }, { passive: false });
 
@@ -211,6 +216,20 @@ function finish() { writeOut(); $('exportBar').hidden = false; status('드래그
 $('reset').addEventListener('click', () => {
   pts = []; dragIdx = -1; $('exportBar').hidden = true; $('out').value = '';
   status('다시 4귀를 탭하세요.'); nextLabel(); render();
+});
+$('loadjson').addEventListener('change', (e) => {
+  const f = e.target.files[0]; if (!f) return;
+  if (!frame) { status('먼저 [현재 프레임 찍기]를 누르세요.'); return; }
+  const rd = new FileReader();
+  rd.onload = () => {
+    try {
+      const d = JSON.parse(rd.result);
+      pts = [d.near_left, d.near_right, d.far_left, d.far_right].map(p => [p[0], p[1]]);
+      nextLabel(); finish(); render();
+      status('불러옴 — 화면 밖 귀는 두 손가락 축소 후 드래그로 수정하세요.');
+    } catch (err) { status('JSON 파싱 실패: ' + err.message); }
+  };
+  rd.readAsText(f);
 });
 $('dl').addEventListener('click', () => {
   const a = document.createElement('a');
