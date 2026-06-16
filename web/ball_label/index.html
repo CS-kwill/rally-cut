@@ -11,10 +11,10 @@
   body { margin:0; font-family: system-ui, sans-serif; }
   #bar { display:flex; gap:8px; align-items:center; padding:8px; flex-wrap:wrap; }
   #wrap { width:100%; background:#000; }
-  canvas { display:block; width:100%; height:auto; touch-action:none; }
+  canvas { display:block; width:100%; height:auto; touch-action:none; user-select:none; -webkit-user-select:none; }
   button { font-size:16px; padding:10px 14px; border-radius:10px; border:1px solid #888; background:#222; color:#fff; }
   button.on { background:#16a34a; border-color:#16a34a; }
-  .big { flex:1; min-width:88px; }
+  .big { flex:1; min-width:80px; }
   #status { font-size:14px; opacity:.85; padding:0 8px 10px; }
   #file { font-size:14px; }
 </style>
@@ -27,54 +27,121 @@
   <button id="none" class="big">공없음</button>
   <button id="bounce" class="big">바운스</button>
   <button id="contact" class="big">타구</button>
+  <button id="fit" class="big">줌리셋</button>
   <button id="dl" class="big">CSV 저장</button>
 </div>
 <div id="wrap"><canvas id="cv"></canvas></div>
-<div id="status">JSON을 불러오세요.</div>
+<div id="status">JSON을 불러오세요. (탭=공 위치, 드래그=미세조정, 핀치/휠=확대)</div>
 <script>
-const cv=document.getElementById('cv'), ctx=cv.getContext('2d');
 const $=id=>document.getElementById(id);
-let data=null, idx=0, labels={}, key='', img=new Image();
+const cv=$('cv'), ctx=cv.getContext('2d');
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+let data=null, idx=0, labels={}, key='', curImg=null;
+let view={scale:1,tx:0,ty:0}, fitScale=1;
 
 function curF(){ return data.frames[idx].f; }
 function lbl(){ const f=curF(); return labels[f] || (labels[f]={present:0,x:null,y:null,bounce:0,contact:0}); }
 function touched(L){ return L.present||L.x!=null||L.bounce||L.contact; }
+function fitView(){ fitScale=cv.width/data.w; view={scale:fitScale,tx:0,ty:0}; }
 
-function ring(x,y,c,r){ ctx.beginPath(); ctx.arc(x,y,r,0,7); ctx.strokeStyle=c; ctx.lineWidth=3; ctx.stroke(); }
 function status(){
   const L=lbl(); const n=Object.values(labels).filter(touched).length;
   $('status').textContent=`${idx+1}/${data.frames.length} (frame ${curF()}) · 라벨 ${n} · `
-    +`present=${L.present} ${L.bounce?'바운스 ':''}${L.contact?'타구':''}`;
+    +`present=${L.present} ${L.bounce?'바운스 ':''}${L.contact?'타구':''} · ${(view.scale/fitScale).toFixed(1)}x`;
   $('bounce').classList.toggle('on', !!L.bounce);
   $('contact').classList.toggle('on', !!L.contact);
 }
-function draw(){
+function ring(x,y,c,baseR){
+  const r=baseR/view.scale, lw=2.5/view.scale;
+  ctx.strokeStyle=c; ctx.lineWidth=lw;
+  ctx.beginPath(); ctx.arc(x,y,r,0,7); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x-r,y); ctx.lineTo(x+r,y); ctx.moveTo(x,y-r); ctx.lineTo(x,y+r); ctx.stroke();
+}
+function render(){
+  ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0,cv.width,cv.height);
   if(!data) return;
+  ctx.setTransform(view.scale,0,0,view.scale,view.tx,view.ty);
+  if(curImg && curImg.complete) ctx.drawImage(curImg,0,0,data.w,data.h);
   const fr=data.frames[idx];
-  cv.width=data.w; cv.height=data.h;
-  img.onload=()=>{
-    ctx.drawImage(img,0,0,data.w,data.h);
-    if(fr.seed) ring(fr.seed[0],fr.seed[1],'#facc15',6);   // 검출 시드(노랑)
-    const L=labels[fr.f];
-    if(L && L.present && L.x!=null) ring(L.x,L.y,'#22c55e',9); // 라벨(초록)
-    status();
-  };
-  img.src='data:image/jpeg;base64,'+fr.jpg;
+  if(fr.seed) ring(fr.seed[0],fr.seed[1],'#facc15',6);   // 검출 시드(노랑)
+  const L=labels[fr.f];
+  if(L && L.present && L.x!=null) ring(L.x,L.y,'#22c55e',9); // 라벨(초록)
+  ctx.setTransform(1,0,0,1,0,0);
+  status();
 }
 function save(){ if(key) localStorage.setItem(key, JSON.stringify(labels)); }
+function loadFrame(){ curImg=new Image(); curImg.onload=render; curImg.src='data:image/jpeg;base64,'+data.frames[idx].jpg; }
+
+// ---- 좌표 변환 ----
+function toCanvas(ev){ const r=cv.getBoundingClientRect();
+  return { cx:(ev.clientX-r.left)/r.width*cv.width, cy:(ev.clientY-r.top)/r.height*cv.height }; }
+const toImg=(cx,cy)=>({ x:(cx-view.tx)/view.scale, y:(cy-view.ty)/view.scale });
+const r1=v=>Math.round(v*10)/10;
+
+// ---- 포인터: 탭=공위치 / 1손가락 드래그=상대 미세이동 / 2손가락=줌+팬 / 휠=줌 ----
+const ptrs=new Map(); const THRESH=8;
+let mode=null, down=null, downMoved=false, pinch=null;
+const dist=(a,b)=>Math.hypot(a.cx-b.cx,a.cy-b.cy);
 
 cv.addEventListener('pointerdown', e=>{
   if(!data) return;
-  const r=cv.getBoundingClientRect();
-  const x=(e.clientX-r.left)/r.width*data.w, y=(e.clientY-r.top)/r.height*data.h;
-  const L=lbl(); L.present=1; L.x=Math.round(x*10)/10; L.y=Math.round(y*10)/10;
-  save(); draw();
+  cv.setPointerCapture(e.pointerId);
+  const {cx,cy}=toCanvas(e); ptrs.set(e.pointerId,{cx,cy});
+  if(ptrs.size===2){
+    const [a,b]=[...ptrs.values()];
+    const mid={cx:(a.cx+b.cx)/2, cy:(a.cy+b.cy)/2};
+    pinch={baseDist:dist(a,b)||1, baseScale:view.scale, midImg:toImg(mid.cx,mid.cy)};
+    mode='pinch'; render(); return;
+  }
+  down={cx,cy}; downMoved=false; mode='pending';
 });
-$('none').onclick=()=>{ const L=lbl(); L.present=0; L.x=null; L.y=null; save(); draw(); };
-$('bounce').onclick=()=>{ const L=lbl(); L.bounce=L.bounce?0:1; save(); draw(); };
-$('contact').onclick=()=>{ const L=lbl(); L.contact=L.contact?0:1; save(); draw(); };
-$('prev').onclick=()=>{ if(data){ idx=Math.max(0,idx-1); draw(); } };
-$('next').onclick=()=>{ if(data){ idx=Math.min(data.frames.length-1,idx+1); draw(); } };
+cv.addEventListener('pointermove', e=>{
+  if(!ptrs.has(e.pointerId)) return;
+  const {cx,cy}=toCanvas(e); const prev=ptrs.get(e.pointerId); ptrs.set(e.pointerId,{cx,cy});
+  if(mode==='pinch' && ptrs.size>=2){
+    const [a,b]=[...ptrs.values()];
+    const mid={cx:(a.cx+b.cx)/2, cy:(a.cy+b.cy)/2};
+    view.scale=clamp(pinch.baseScale*dist(a,b)/pinch.baseDist, fitScale*0.5, fitScale*40);
+    view.tx=mid.cx-pinch.midImg.x*view.scale; view.ty=mid.cy-pinch.midImg.y*view.scale;
+    render(); return;
+  }
+  if(mode!=='pending' && mode!=='drag') return;
+  if(!downMoved && Math.hypot(cx-down.cx,cy-down.cy)>THRESH){
+    downMoved=true; const L=lbl();
+    if(!(L.present && L.x!=null)){ const img=toImg(down.cx,down.cy); L.present=1; L.x=r1(img.x); L.y=r1(img.y); }
+    mode='drag';
+  }
+  if(mode==='drag'){
+    const a=toImg(prev.cx,prev.cy), b=toImg(cx,cy); const L=lbl();
+    L.x=r1(L.x+(b.x-a.x)); L.y=r1(L.y+(b.y-a.y)); save(); render();
+  }
+});
+function endPointer(e){
+  if(mode==='pending' && !downMoved){          // 탭 → 공 위치 설정(절대)
+    const img=toImg(down.cx,down.cy); const L=lbl(); L.present=1; L.x=r1(img.x); L.y=r1(img.y); save();
+  }
+  ptrs.delete(e.pointerId);
+  if(ptrs.size===0){ mode=null; }
+  else if(ptrs.size===1 && mode==='pinch'){     // 핀치 풀려 한 손가락 → 비활성
+    const [p]=[...ptrs.values()]; down={cx:p.cx,cy:p.cy}; downMoved=true; mode='pending';
+  }
+  render();
+}
+cv.addEventListener('pointerup', endPointer);
+cv.addEventListener('pointercancel', endPointer);
+cv.addEventListener('wheel', e=>{
+  if(!data) return; e.preventDefault();
+  const {cx,cy}=toCanvas(e); const ix=(cx-view.tx)/view.scale, iy=(cy-view.ty)/view.scale;
+  view.scale=clamp(view.scale*(e.deltaY<0?1.15:1/1.15), fitScale*0.5, fitScale*40);
+  view.tx=cx-ix*view.scale; view.ty=cy-iy*view.scale; render();
+}, {passive:false});
+
+$('none').onclick=()=>{ const L=lbl(); L.present=0; L.x=null; L.y=null; save(); render(); };
+$('bounce').onclick=()=>{ const L=lbl(); L.bounce=L.bounce?0:1; save(); render(); };
+$('contact').onclick=()=>{ const L=lbl(); L.contact=L.contact?0:1; save(); render(); };
+$('fit').onclick=()=>{ if(data){ fitView(); render(); } };
+$('prev').onclick=()=>{ if(data){ idx=Math.max(0,idx-1); loadFrame(); } };
+$('next').onclick=()=>{ if(data){ idx=Math.min(data.frames.length-1,idx+1); loadFrame(); } };
 
 $('file').addEventListener('change', ev=>{
   const f=ev.target.files[0]; if(!f) return;
@@ -82,26 +149,21 @@ $('file').addEventListener('change', ev=>{
   rd.onload=()=>{
     data=JSON.parse(rd.result); idx=0;
     key='balllabels_'+(data.video||'vid');
-    const saved=localStorage.getItem(key);
-    labels = saved ? JSON.parse(saved) : {};
-    draw();
+    const saved=localStorage.getItem(key); labels = saved ? JSON.parse(saved) : {};
+    cv.width=data.w; cv.height=data.h; fitView(); loadFrame();
   };
   rd.readAsText(f);
 });
-
 $('dl').onclick=()=>{
   if(!data) return;
   const rows=['frame,present,x,y,bounce,contact'];
   Object.keys(labels).map(Number).sort((a,b)=>a-b).forEach(f=>{
-    const L=labels[f];
-    if(!touched(L)) return;
+    const L=labels[f]; if(!touched(L)) return;
     rows.push([f, L.present?1:0, L.x==null?'':L.x, L.y==null?'':L.y, L.bounce?1:0, L.contact?1:0].join(','));
   });
   const blob=new Blob([rows.join('\n')], {type:'text/csv'});
-  const a=document.createElement('a');
-  a.href=URL.createObjectURL(blob);
-  a.download='ball_gt_'+(data.video||'vid')+'.csv';
-  a.click();
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+  a.download='ball_gt_'+(data.video||'vid')+'.csv'; a.click();
 };
 </script>
 </body>
