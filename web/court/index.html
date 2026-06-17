@@ -78,12 +78,17 @@ $('file').addEventListener('change', (e) => {
   videoFile = e.target.files[0] || null;
   if (!videoFile) return;
   const v = $('video');
+  v.preload = 'auto';
   v.src = URL.createObjectURL(videoFile);
   v.style.display = 'block';
+  status('영상 로딩 중…(큰 파일은 잠깐)');
   v.onloadedmetadata = () => {
     natW = v.videoWidth; natH = v.videoHeight;
-    status(`${videoFile.name} (${natW}x${natH}) — 프레임 찾고 [현재 프레임 찍기]`);
     $('grab').disabled = false;
+    status(`${videoFile.name} (${natW}x${natH}) — 스크럽 후 [현재 프레임 찍기]`);
+    // iOS Safari는 사용자 제스처 전 <video> 첫 프레임을 안 칠해 흰 스피너만 돈다.
+    // muted 영상을 play→즉시 pause 하면 첫 프레임이 디코드돼 바로 보인다(+seek 폴백).
+    v.play().then(() => v.pause()).catch(() => { try { v.currentTime = 0.05; } catch (_) {} });
   };
 });
 
