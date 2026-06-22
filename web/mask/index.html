@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>rally-cut 마스킹 피커</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, system-ui, sans-serif; margin: 0; padding: 10px;
+         max-width: 900px; margin-inline: auto; font-size: 16px; }
+  h1 { font-size: 1.1em; margin: 4px 0 8px; }
+  h1 small { font-weight: 400; opacity: .6; }
+  .row { display: flex; gap: 8px; align-items: center; margin: 8px 0; flex-wrap: wrap; }
+  button { font-size: 15px; padding: 9px 14px; border-radius: 9px; border: 1px solid #8886;
+           background: #2563eb; color: #fff; }
+  button.aux { background: #6b7280; }
+  button:disabled { opacity: .4; }
+  video { display: none; }
+  canvas { width: 100%; border-radius: 8px; background: #000; touch-action: none; cursor: crosshair;
+           user-select: none; -webkit-user-select: none; }
+  #status { font-size: 14px; min-height: 1.3em; margin: 6px 0; }
+  #out { width: 100%; min-height: 4em; font-family: monospace; font-size: 13px; }
+  ol { font-size: 13px; opacity: .85; margin: 6px 0; padding-left: 1.2em; }
+</style>
+</head>
+<body>
+<h1>rally-cut <small>마스킹 피커 — 코트 주변 검출영역(임의 다각형) mask.json</small></h1>
+
+<input id="file" type="file" accept="video/*">
+<div class="row">
+  <button id="grab" disabled>현재 프레임 찍기</button>
+  <button id="undo" class="aux" disabled>되돌리기(점 1개)</button>
+  <button id="reset" class="aux" disabled>초기화</button>
+  <button id="fit" class="aux" disabled>줌 리셋</button>
+  <span id="status">영상을 선택하세요.</span>
+</div>
+<div class="row">
+  <label for="loadmask" style="font-size:13px">기존 mask.json 수정(선택):</label>
+  <input id="loadmask" type="file" accept=".json,application/json" disabled>
+  <label for="loadcourt" style="font-size:13px">코트 참조 court.json(선택):</label>
+  <input id="loadcourt" type="file" accept=".json,application/json" disabled>
+</div>
+<ol>
+  <li>코트 잘 보이는 프레임에서 [현재 프레임 찍기] (코트 참조 원하면 court.json 불러오기)</li>
+  <li><b>탭 = 마스크 경계 점 추가</b> (순서대로 외곽선을 따라 찍기 — 점 개수 제한 없음)</li>
+  <li><b>드래그 = 가장 가까운 점 이동</b> · <b>핀치/휠 = 확대</b> · 두 손가락 = 화면 이동</li>
+  <li>코트 + 아웃볼 여유까지 넉넉히 감싸되 <b>옆코트·배경은 제외</b> (밝은 영역=검출 유지, 어두운 영역=노이즈 제거)</li>
+  <li>3점 이상이면 mask.json 내보내기</li>
+</ol>
+<video id="video" controls playsinline muted></video>
+<canvas id="cv" width="1280" height="720" style="display:none"></canvas>
+
+<div class="row" id="exportBar" hidden>
+  <button id="dl" class="aux">mask.json 다운로드</button>
+  <button id="copy" class="aux">복사</button>
+  <button id="share" class="aux">공유</button>
+</div>
+<textarea id="out" readonly placeholder="3점 이상 찍으면 mask.json이 여기에 나옵니다."></textarea>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const cv = $('cv'), ctx = cv.getContext('2d');
+let videoFile = null, natW = 0, natH = 0;
+let frame = null;                 // 캡처 프레임(원본해상도)
+let pts = [];                     // 마스크 다각형(원본 픽셀 좌표)
+let courtPts = null;              // 코트 참조(원본 픽셀, [nl,nr,fr,fl]) — 표시용
+let view = { scale: 1, tx: 0, ty: 0 }, fitScale = 1;
+let dragIdx = -1;
+
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+function status(m) { $('status').textContent = m; }
+function info() { status(`점 ${pts.length}개 — 탭=추가 · 드래그=이동 · 핀치=확대` + (pts.length >= 3 ? ' · 내보내기 가능' : '')); }
+
+$('file').addEventListener('change', (e) => {
+  videoFile = e.target.files[0] || null;
+  if (!videoFile) return;
+  const v = $('video');
+  v.preload = 'auto'; v.src = URL.createObjectURL(videoFile); v.style.display = 'block';
+  status('영상 로딩 중…(큰 파일은 잠깐)');
+  v.onloadedmetadata = () => {
+    natW = v.videoWidth; natH = v.videoHeight; $('grab').disabled = false;
+    status(`${videoFile.name} (${natW}x${natH}) — 스크럽 후 [현재 프레임 찍기]`);
+    v.play().then(() => v.pause()).catch(() => { try { v.currentTime = 0.05; } catch (_) {} });
+  };
+});
+
+$('grab').addEventListener('click', () => {
+  const v = $('video');
+  frame = document.createElement('canvas'); frame.width = natW; frame.height = natH;
+  frame.getContext('2d').drawImage(v, 0, 0, natW, natH);
+  v.style.display = 'none';
+  cv.width = 1280; cv.height = Math.round(1280 * natH / natW); cv.style.display = 'block';
+  fitView();
+  pts = []; dragIdx = -1;
+  ['undo', 'reset', 'fit', 'loadmask', 'loadcourt'].forEach(id => $(id).disabled = false);
+  info(); render();
+});
+
+function fitView() { fitScale = cv.width / natW; view = { scale: fitScale, tx: 0, ty: 0 }; }
+$('fit').addEventListener('click', () => { fitView(); render(); });
+
+// ---- 좌표 변환 ----
+function toCanvas(ev) {
+  const r = cv.getBoundingClientRect();
+  return { cx: (ev.clientX - r.left) / r.width * cv.width, cy: (ev.clientY - r.top) / r.height * cv.height };
+}
+const toImg = (cx, cy) => ({ x: (cx - view.tx) / view.scale, y: (cy - view.ty) / view.scale });
+
+function render() {
+  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, cv.width, cv.height);
+  if (!frame) return;
+  ctx.setTransform(view.scale, 0, 0, view.scale, view.tx, view.ty);
+  ctx.imageSmoothingEnabled = true; ctx.drawImage(frame, 0, 0);
+  const r = 9 / view.scale, lw = 2.5 / view.scale;
+  // 마스크 밖(이미지영역) 어둡게: rect + polygon(hole) evenodd
+  if (pts.length >= 3) {
+    ctx.beginPath(); ctx.rect(0, 0, natW, natH);
+    ctx.moveTo(pts[0][0], pts[0][1]); for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]); ctx.closePath();
+    ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fill('evenodd');
+  }
+  // 코트 참조(있으면 시안 점선)
+  if (courtPts) {
+    ctx.strokeStyle = '#22d3ee'; ctx.lineWidth = lw; ctx.setLineDash([8 / view.scale, 6 / view.scale]);
+    ctx.beginPath(); ctx.moveTo(courtPts[0][0], courtPts[0][1]);
+    courtPts.slice(1).forEach(p => ctx.lineTo(p[0], p[1])); ctx.closePath(); ctx.stroke(); ctx.setLineDash([]);
+  }
+  // 마스크 다각형(초록)
+  if (pts.length >= 2) {
+    ctx.strokeStyle = '#22c55e'; ctx.lineWidth = lw; ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]); if (pts.length >= 3) ctx.closePath(); ctx.stroke();
+  }
+  pts.forEach(([x, y], i) => {
+    ctx.beginPath(); ctx.arc(x, y, r, 0, 7);
+    ctx.fillStyle = (i === dragIdx) ? '#22c55e' : '#ff3b30'; ctx.fill();
+    ctx.lineWidth = lw; ctx.strokeStyle = '#fff'; ctx.stroke();
+    ctx.fillStyle = '#fff'; ctx.font = `${13 / view.scale}px sans-serif`; ctx.fillText(String(i + 1), x + r, y - r);
+  });
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+}
+
+// ---- 포인터 ----
+const ptrs = new Map();
+const THRESH = 12;
+let mode = null, grabIdx = -1, down = null, downMoved = false, pinch = null;
+const dist = (a, b) => Math.hypot(a.cx - b.cx, a.cy - b.cy);
+function nearestPoint(img) {
+  let best = -1, bd = Infinity;
+  pts.forEach(([x, y], i) => { const d = Math.hypot(x - img.x, y - img.y); if (d < bd) { bd = d; best = i; } });
+  return best;
+}
+cv.addEventListener('pointerdown', (e) => {
+  if (!frame) return; cv.setPointerCapture(e.pointerId);
+  const { cx, cy } = toCanvas(e); ptrs.set(e.pointerId, { cx, cy });
+  if (ptrs.size === 2) {
+    const [a, b] = [...ptrs.values()]; const mid = { cx: (a.cx + b.cx) / 2, cy: (a.cy + b.cy) / 2 };
+    pinch = { baseDist: dist(a, b) || 1, baseScale: view.scale, midImg: toImg(mid.cx, mid.cy) }; mode = 'pinch'; dragIdx = -1; render(); return;
+  }
+  down = { cx, cy }; downMoved = false; grabIdx = pts.length ? nearestPoint(toImg(cx, cy)) : -1; mode = 'pending';
+});
+cv.addEventListener('pointermove', (e) => {
+  if (!ptrs.has(e.pointerId)) return;
+  const { cx, cy } = toCanvas(e); const prev = ptrs.get(e.pointerId); ptrs.set(e.pointerId, { cx, cy });
+  if (mode === 'pinch' && ptrs.size >= 2) {
+    const [a, b] = [...ptrs.values()]; const mid = { cx: (a.cx + b.cx) / 2, cy: (a.cy + b.cy) / 2 };
+    view.scale = clamp(pinch.baseScale * dist(a, b) / pinch.baseDist, fitScale * 0.25, fitScale * 30);
+    view.tx = mid.cx - pinch.midImg.x * view.scale; view.ty = mid.cy - pinch.midImg.y * view.scale; render(); return;
+  }
+  if (mode !== 'pending' && mode !== 'drag') return;
+  if (!downMoved && Math.hypot(cx - down.cx, cy - down.cy) > THRESH) {
+    downMoved = true; if (grabIdx >= 0) { mode = 'drag'; dragIdx = grabIdx; }
+  }
+  if (mode === 'drag') {
+    const a = toImg(prev.cx, prev.cy), b = toImg(cx, cy); const [px, py] = pts[dragIdx];
+    pts[dragIdx] = [px + (b.x - a.x), py + (b.y - a.y)]; render(); if (pts.length >= 3) writeOut();
+  }
+});
+function endPointer(e) {
+  if (mode === 'pending' && !downMoved) {          // 탭 = 점 추가(개수 제한 없음, 화면 밖 허용)
+    const img = toImg(down.cx, down.cy); pts.push([Math.round(img.x), Math.round(img.y)]);
+    info(); if (pts.length >= 3) finish();
+  }
+  ptrs.delete(e.pointerId);
+  if (ptrs.size === 0) { mode = null; dragIdx = -1; }
+  else if (ptrs.size === 1 && mode === 'pinch') { const [p] = [...ptrs.values()]; down = { cx: p.cx, cy: p.cy }; downMoved = true; grabIdx = -1; mode = 'pending'; }
+  render();
+}
+cv.addEventListener('pointerup', endPointer);
+cv.addEventListener('pointercancel', endPointer);
+cv.addEventListener('wheel', (e) => {
+  if (!frame) return; e.preventDefault();
+  const { cx, cy } = toCanvas(e); const ix = (cx - view.tx) / view.scale, iy = (cy - view.ty) / view.scale;
+  view.scale = clamp(view.scale * (e.deltaY < 0 ? 1.15 : 1 / 1.15), fitScale * 0.25, fitScale * 30);
+  view.tx = cx - ix * view.scale; view.ty = cy - iy * view.scale; render();
+}, { passive: false });
+
+// ---- 내보내기 ----
+function maskJson() { return { mask: pts, w: natW, h: natH }; }
+function jsonText() { return JSON.stringify(maskJson()); }
+function fname() { return 'mask_' + ((videoFile && videoFile.name.replace(/\.[^.]+$/, '')) || 'video') + '.json'; }
+function writeOut() { $('out').value = jsonText(); }
+function finish() { writeOut(); $('exportBar').hidden = false; }
+
+$('undo').addEventListener('click', () => { pts.pop(); dragIdx = -1; if (pts.length < 3) { $('exportBar').hidden = true; $('out').value = ''; } else writeOut(); info(); render(); });
+$('reset').addEventListener('click', () => { pts = []; dragIdx = -1; $('exportBar').hidden = true; $('out').value = ''; info(); render(); });
+$('loadmask').addEventListener('change', (e) => {
+  const f = e.target.files[0]; if (!f || !frame) { if (!frame) status('먼저 [현재 프레임 찍기].'); return; }
+  const rd = new FileReader(); rd.onload = () => {
+    try { const d = JSON.parse(rd.result); pts = (d.mask || d).map(p => [p[0], p[1]]); if (pts.length >= 3) finish(); info(); render(); }
+    catch (err) { status('JSON 파싱 실패: ' + err.message); }
+  }; rd.readAsText(f);
+});
+$('loadcourt').addEventListener('change', (e) => {
+  const f = e.target.files[0]; if (!f || !frame) { if (!frame) status('먼저 [현재 프레임 찍기].'); return; }
+  const rd = new FileReader(); rd.onload = () => {
+    try { const d = JSON.parse(rd.result); courtPts = [d.near_left, d.near_right, d.far_right, d.far_left].map(p => [p[0], p[1]]); status('코트 참조 표시(시안 점선).'); render(); }
+    catch (err) { status('court.json 파싱 실패: ' + err.message); }
+  }; rd.readAsText(f);
+});
+$('dl').addEventListener('click', () => {
+  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([jsonText()], { type: 'application/json' }));
+  a.download = fname(); a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 20000);
+});
+$('copy').addEventListener('click', async () => {
+  try { await navigator.clipboard.writeText(jsonText()); status('복사 완료.'); }
+  catch { $('out').select(); document.execCommand('copy'); status('복사 완료(폴백).'); }
+});
+$('share').addEventListener('click', async () => {
+  const f = new File([jsonText()], fname(), { type: 'application/json' });
+  if (navigator.canShare && navigator.canShare({ files: [f] })) { try { await navigator.share({ files: [f] }); } catch {} }
+  else status('공유 미지원 — 다운로드/복사 사용.');
+});
+</script>
+</body>
+</html>
