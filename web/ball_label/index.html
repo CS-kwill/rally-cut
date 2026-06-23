@@ -14,6 +14,7 @@
   canvas { display:block; width:100%; height:auto; touch-action:none; user-select:none; -webkit-user-select:none; }
   button { font-size:16px; padding:10px 14px; border-radius:10px; border:1px solid #888; background:#222; color:#fff; }
   button.on { background:#16a34a; border-color:#16a34a; }
+  button.key-btn { background:#1d4ed8; border-color:#1d4ed8; }
   .big { flex:1; min-width:80px; }
   #status { font-size:14px; opacity:.85; padding:0 8px 10px; }
   #file { font-size:14px; }
@@ -28,6 +29,7 @@
   <button id="bounce" class="big">바운스</button>
   <button id="contact" class="big">타구</button>
   <button id="fit" class="big">줌리셋</button>
+  <button id="interp" class="big key-btn">보간 실행</button>
   <button id="dl" class="big">CSV 저장</button>
 </div>
 <div id="wrap"><canvas id="cv"></canvas></div>
@@ -40,22 +42,113 @@ let data=null, idx=0, labels={}, key='', curImg=null;
 let view={scale:1,tx:0,ty:0}, fitScale=1;
 
 function curF(){ return data.frames[idx].f; }
-function lbl(){ const f=curF(); return labels[f] || (labels[f]={present:0,x:null,y:null,bounce:0,contact:0}); }
+function lbl(){ const f=curF(); return labels[f] || (labels[f]={present:0,x:null,y:null,bounce:0,contact:0,isKey:false}); }
 function touched(L){ return L.present||L.x!=null||L.bounce||L.contact; }
 function fitView(){ fitScale=cv.width/data.w; view={scale:fitScale,tx:0,ty:0}; }
 
+// ---- 키프레임 곡선 보간 (Catmull-Rom 스플라인) ----
+// 순수 함수: labels 객체와 전체 프레임 번호 배열을 받아
+// 인접 키프레임 사이의 보간 결과를 반환(기존 labels를 변경하지 않음).
+// 키프레임: isKey=true && x!=null
+// 반환: { [frameNum]: { present:1, x, y, isKey:false } }
+// 테니스공은 중력으로 포물선 궤적 → 키프레임을 통과하는 Catmull-Rom 곡선으로 보간.
+// 키프레임 2개면 선형 폴백, 3개 이상이면 곡선(직선 배치면 거의 직선으로 수렴).
+function catmullRom(p0, p1, p2, p3, t) {
+  // 균일 Catmull-Rom(tension 0.5 표준). 구간 [p1,p2] 사이 t∈[0,1].
+  const t2 = t * t, t3 = t2 * t;
+  return 0.5 * ((2 * p1) + (-p0 + p2) * t
+    + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2
+    + (-p0 + 3 * p1 - 3 * p2 + p3) * t3);
+}
+function interpolateTrack(labels, frameNums) {
+  const kf = frameNums
+    .filter(f => labels[f] && labels[f].isKey && labels[f].x != null)
+    .map(f => ({ f, x: labels[f].x, y: labels[f].y }));
+
+  if (kf.length < 2) return {};
+  const r1 = v => Math.round(v * 10) / 10;
+  const result = {};
+
+  // 키프레임 2개 → 선형(폴백)
+  if (kf.length === 2) {
+    const a = kf[0], b = kf[1];
+    for (const f of frameNums.filter(f => f > a.f && f < b.f)) {
+      const t = (f - a.f) / (b.f - a.f);
+      result[f] = { present:1, x:r1(a.x+(b.x-a.x)*t), y:r1(a.y+(b.y-a.y)*t), isKey:false };
+    }
+    return result;
+  }
+
+  // 키프레임 3개 이상 → Catmull-Rom 곡선
+  // 각 구간 [kf[i], kf[i+1]]: P1=kf[i], P2=kf[i+1], P0/P3=인접 키프레임(끝은 복제).
+  for (let i = 0; i < kf.length - 1; i++) {
+    const p1 = kf[i], p2 = kf[i + 1];
+    // 끝 구간은 선형 외삽으로 가상 제어점 생성(직선 키프레임이면 완벽한 직선 보존).
+    const p0 = (i > 0) ? kf[i - 1] : { x: 2 * p1.x - p2.x, y: 2 * p1.y - p2.y };
+    const p3 = (i + 2 < kf.length) ? kf[i + 2] : { x: 2 * p2.x - p1.x, y: 2 * p2.y - p1.y };
+    for (const f of frameNums.filter(f => f > p1.f && f < p2.f)) {
+      const t = (f - p1.f) / (p2.f - p1.f);
+      result[f] = {
+        present: 1,
+        x: r1(catmullRom(p0.x, p1.x, p2.x, p3.x, t)),
+        y: r1(catmullRom(p0.y, p1.y, p2.y, p3.y, t)),
+        isKey: false,
+      };
+    }
+  }
+  return result;
+}
+
+// 보간 실행: labels에 반영 (기존 isKey 프레임 보존, 비Key 프레임 덮어쓰기)
+function applyInterpolation() {
+  if (!data) return 0;
+  const allF = data.frames.map(fr => fr.f);
+  const interped = interpolateTrack(labels, allF);
+  let count = 0;
+  for (const [fStr, v] of Object.entries(interped)) {
+    const f = Number(fStr);
+    const existing = labels[f];
+    // 이미 키프레임인 경우 건드리지 않음
+    if (existing && existing.isKey) continue;
+    // bounce/contact는 기존 값 보존
+    labels[f] = {
+      present: v.present,
+      x: v.x,
+      y: v.y,
+      bounce: (existing && existing.bounce) || 0,
+      contact: (existing && existing.contact) || 0,
+      isKey: false,
+    };
+    count++;
+  }
+  save();
+  return count;
+}
+
+function keyframeCount() {
+  return Object.values(labels).filter(L => L.isKey && L.x != null).length;
+}
+
 function status(){
   const L=lbl(); const n=Object.values(labels).filter(touched).length;
-  $('status').textContent=`${idx+1}/${data.frames.length} (frame ${curF()}) · 라벨 ${n} · `
-    +`present=${L.present} ${L.bounce?'바운스 ':''}${L.contact?'타구':''} · ${(view.scale/fitScale).toFixed(1)}x`;
+  const kc = keyframeCount();
+  const isK = L.isKey ? '🔑키' : (L.present && L.x!=null ? '⬤보간' : '');
+  $('status').textContent=`${idx+1}/${data.frames.length} (frame ${curF()}) · 라벨 ${n} · 키프레임 ${kc} · `
+    +`present=${L.present} ${isK} ${L.bounce?'바운스 ':''}${L.contact?'타구':''} · ${(view.scale/fitScale).toFixed(1)}x`;
   $('bounce').classList.toggle('on', !!L.bounce);
   $('contact').classList.toggle('on', !!L.contact);
+  $('interp').textContent = `보간 실행 (키${kc})`;
 }
-function ring(x,y,c,baseR){
+function ring(x,y,c,baseR, dashed){
   const r=baseR/view.scale, lw=2.5/view.scale;
   ctx.strokeStyle=c; ctx.lineWidth=lw;
+  if (dashed) ctx.setLineDash([r*0.5, r*0.3]);
+  else ctx.setLineDash([]);
+  ctx.globalAlpha = dashed ? 0.55 : 1.0;
   ctx.beginPath(); ctx.arc(x,y,r,0,7); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(x-r,y); ctx.lineTo(x+r,y); ctx.moveTo(x,y-r); ctx.lineTo(x,y+r); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.globalAlpha = 1.0;
 }
 function render(){
   ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0,cv.width,cv.height);
@@ -65,7 +158,15 @@ function render(){
   const fr=data.frames[idx];
   if(fr.seed) ring(fr.seed[0],fr.seed[1],'#facc15',6);   // 검출 시드(노랑)
   const L=labels[fr.f];
-  if(L && L.present && L.x!=null) ring(L.x,L.y,'#22c55e',9); // 라벨(초록)
+  if(L && L.present && L.x!=null){
+    if(L.isKey){
+      // 키프레임: 실선 밝은 초록, 더 크게
+      ring(L.x,L.y,'#22c55e',10, false);
+    } else {
+      // 보간 프레임: 점선 + 반투명 하늘색
+      ring(L.x,L.y,'#38bdf8',9, true);
+    }
+  }
   ctx.setTransform(1,0,0,1,0,0);
   status();
 }
@@ -78,7 +179,29 @@ function toCanvas(ev){ const r=cv.getBoundingClientRect();
 const toImg=(cx,cy)=>({ x:(cx-view.tx)/view.scale, y:(cy-view.ty)/view.scale });
 const r1=v=>Math.round(v*10)/10;
 
-// ---- 포인터: 탭=공위치 / 1손가락 드래그=상대 미세이동 / 2손가락=줌+팬 / 휠=줌 ----
+// 클릭/드래그 후 해당 프레임을 키프레임으로 승격하고 인접 구간 재보간
+function promoteToKey(f) {
+  if (!labels[f]) return;
+  labels[f].isKey = true;
+  // 재보간
+  const allF = data.frames.map(fr => fr.f);
+  const interped = interpolateTrack(labels, allF);
+  for (const [fStr, v] of Object.entries(interped)) {
+    const ff = Number(fStr);
+    if (labels[ff] && labels[ff].isKey) continue;
+    const existing = labels[ff] || {};
+    labels[ff] = {
+      present: v.present,
+      x: v.x,
+      y: v.y,
+      bounce: existing.bounce || 0,
+      contact: existing.contact || 0,
+      isKey: false,
+    };
+  }
+}
+
+// ---- 포인터: 탭=공위치(키프레임 승격) / 1손가락 드래그=상대 미세이동 / 2손가락=줌+팬 / 휠=줌 ----
 const ptrs=new Map(); const THRESH=8;
 let mode=null, down=null, downMoved=false, pinch=null;
 const dist=(a,b)=>Math.hypot(a.cx-b.cx,a.cy-b.cy);
@@ -113,12 +236,18 @@ cv.addEventListener('pointermove', e=>{
   }
   if(mode==='drag'){
     const a=toImg(prev.cx,prev.cy), b=toImg(cx,cy); const L=lbl();
-    L.x=r1(L.x+(b.x-a.x)); L.y=r1(L.y+(b.y-a.y)); save(); render();
+    L.x=r1(L.x+(b.x-a.x)); L.y=r1(L.y+(b.y-a.y));
+    // 드래그 중 키프레임 승격
+    L.isKey = true;
+    save(); render();
   }
 });
 function endPointer(e){
-  if(mode==='pending' && !downMoved){          // 탭 → 공 위치 설정(절대)
-    const img=toImg(down.cx,down.cy); const L=lbl(); L.present=1; L.x=r1(img.x); L.y=r1(img.y); save();
+  if(mode==='pending' && !downMoved){          // 탭 → 공 위치 설정(절대) + 키프레임 승격
+    const img=toImg(down.cx,down.cy); const L=lbl();
+    L.present=1; L.x=r1(img.x); L.y=r1(img.y);
+    promoteToKey(curF());
+    save();
   }
   ptrs.delete(e.pointerId);
   if(ptrs.size===0){ mode=null; }
@@ -136,12 +265,36 @@ cv.addEventListener('wheel', e=>{
   view.tx=cx-ix*view.scale; view.ty=cy-iy*view.scale; render();
 }, {passive:false});
 
-$('none').onclick=()=>{ const L=lbl(); L.present=0; L.x=null; L.y=null; save(); render(); };
+$('none').onclick=()=>{
+  const f=curF(); const L=lbl();
+  L.present=0; L.x=null; L.y=null; L.isKey=false;
+  // present=0 토글 시 해당 프레임의 보간된 이웃 재보간
+  const allF = data.frames.map(fr => fr.f);
+  const interped = interpolateTrack(labels, allF);
+  // 이 프레임이 키프레임이었다면, 이웃 보간 결과 업데이트
+  for (const [fStr, v] of Object.entries(interped)) {
+    const ff = Number(fStr);
+    if (labels[ff] && labels[ff].isKey) continue;
+    const existing = labels[ff] || {};
+    labels[ff] = { present:v.present, x:v.x, y:v.y,
+      bounce: existing.bounce||0, contact: existing.contact||0, isKey:false };
+  }
+  save(); render();
+};
 $('bounce').onclick=()=>{ const L=lbl(); L.bounce=L.bounce?0:1; save(); render(); };
 $('contact').onclick=()=>{ const L=lbl(); L.contact=L.contact?0:1; save(); render(); };
 $('fit').onclick=()=>{ if(data){ fitView(); render(); } };
 $('prev').onclick=()=>{ if(data){ idx=Math.max(0,idx-1); loadFrame(); } };
 $('next').onclick=()=>{ if(data){ idx=Math.min(data.frames.length-1,idx+1); loadFrame(); } };
+
+$('interp').onclick=()=>{
+  if(!data){ alert('JSON을 먼저 불러오세요.'); return; }
+  const kc = keyframeCount();
+  if(kc < 2){ alert(`키프레임이 2개 이상 필요합니다. (현재 ${kc}개)\n공 위치를 클릭하면 키프레임이 됩니다.`); return; }
+  const count = applyInterpolation();
+  render();
+  alert(`보간 완료: ${count}개 프레임 채움 (키프레임 ${kc}개)`);
+};
 
 $('file').addEventListener('change', ev=>{
   const f=ev.target.files[0]; if(!f) return;
@@ -150,6 +303,10 @@ $('file').addEventListener('change', ev=>{
     data=JSON.parse(rd.result); idx=0;
     key='balllabels_'+(data.video||'vid');
     const saved=localStorage.getItem(key); labels = saved ? JSON.parse(saved) : {};
+    // 기존 저장된 라벨에 isKey 필드 없으면 기본값 부여 (하위 호환)
+    for (const f in labels) {
+      if (labels[f].isKey === undefined) labels[f].isKey = false;
+    }
     cv.width=data.w; cv.height=data.h; fitView(); loadFrame();
   };
   rd.readAsText(f);
