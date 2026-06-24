@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>rally-cut 캘리브 프레임 추출기</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, system-ui, sans-serif; margin: 0; padding: 10px;
+         max-width: 900px; margin-inline: auto; font-size: 16px; }
+  h1 { font-size: 1.1em; margin: 4px 0 8px; }
+  h1 small { font-weight: 400; opacity: .6; }
+  .row { display: flex; gap: 8px; align-items: center; margin: 8px 0; flex-wrap: wrap; }
+  button { font-size: 15px; padding: 9px 14px; border-radius: 9px; border: 1px solid #8886;
+           background: #2563eb; color: #fff; }
+  button.aux { background: #6b7280; }
+  button.grab { background: #16a34a; font-weight: 700; }
+  button:disabled { opacity: .4; }
+  video { display: none; }
+  canvas { width: 100%; border-radius: 8px; background: #000; touch-action: none;
+           user-select: none; -webkit-user-select: none; }
+  #status { font-size: 14px; min-height: 1.3em; margin: 6px 0; }
+  #seek { width: 100%; }
+  #sharp { font-weight: 700; font-size: 1.05em; }
+  #sharp .bar { display: inline-block; height: 10px; border-radius: 5px; vertical-align: middle;
+                background: linear-gradient(90deg,#ef4444,#f59e0b,#22c55e); }
+  ol { font-size: 13px; opacity: .85; margin: 6px 0; padding-left: 1.2em; }
+  #grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+          gap: 6px; margin: 8px 0; }
+  .thumb { position: relative; border-radius: 6px; overflow: hidden; border: 1px solid #8884; }
+  .thumb img { width: 100%; display: block; }
+  .thumb .meta { position: absolute; left: 0; bottom: 0; right: 0; font-size: 11px;
+                 background: #000a; color: #fff; padding: 1px 4px; }
+  .thumb .del { position: absolute; top: 2px; right: 2px; background: #ef4444; color: #fff;
+                border: none; border-radius: 50%; width: 22px; height: 22px; padding: 0;
+                font-size: 14px; line-height: 1; }
+</style>
+</head>
+<body>
+<h1>rally-cut <small>캘리브 프레임 추출기 — ChArUco 사진 골라담기</small></h1>
+
+<input id="file" type="file" accept="video/*">
+<div class="row">
+  <span id="status">캘리브 보드 촬영 영상을 선택하세요.</span>
+</div>
+
+<video id="video" controls playsinline muted></video>
+<canvas id="cv" width="1280" height="720" style="display:none"></canvas>
+
+<div class="row" id="nav" hidden>
+  <button id="prevF" class="aux">◀ −1f</button>
+  <button id="prevS" class="aux">−0.5s</button>
+  <button id="nextS" class="aux">+0.5s</button>
+  <button id="nextF" class="aux">+1f ▶</button>
+  <span id="tlabel" style="font-size:13px"></span>
+</div>
+<input id="seek" type="range" min="0" max="1000" value="0" hidden>
+<div class="row" id="sharpRow" hidden>
+  <span id="sharp"></span>
+</div>
+<div class="row" id="grabRow" hidden>
+  <button id="grab" class="grab">＋ 이 프레임 담기</button>
+  <span id="count" style="font-size:13px"></span>
+</div>
+
+<ol>
+  <li><b>선명한</b> 프레임만 담기 — 흐림 점수가 낮으면(빨강) 모션블러라 캘리브를 망칩니다.</li>
+  <li><b>다양하게</b>: 보드를 화면 중앙/네 구석/가까이/멀리/기울여 — 각도·거리·위치를 골고루.</li>
+  <li>보드 <b>전체가 프레임 안</b>에, 흔들림 없이. <b>15~25장</b> 권장.</li>
+  <li>다 담으면 [ZIP 다운로드] → 데스크톱서 풀어 폴더로 → <code>calibrate_camera_charuco.py --images &lt;폴더&gt;</code></li>
+</ol>
+
+<div class="row" id="exportBar" hidden>
+  <button id="zip">ZIP 다운로드</button>
+  <button id="ts" class="aux">timestamps.json</button>
+  <button id="share" class="aux">공유</button>
+</div>
+
+<div id="grid"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const cv = $('cv'), ctx = cv.getContext('2d');
+let videoFile = null, natW = 0, natH = 0, dur = 0, fps = 30;
+let frame = null;                  // 현재 프레임(offscreen, 원본해상도)
+let seeking = false, pendingSeek = null;
+const shots = [];                  // {time, blur, blob, thumb}
+
+function status(m) { $('status').textContent = m; }
+const fmt = (t) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')}.${String(Math.floor((t % 1) * 100)).padStart(2, '0')}`;
+
+$('file').addEventListener('change', (e) => {
+  videoFile = e.target.files[0] || null;
+  if (!videoFile) return;
+  const v = $('video');
+  v.preload = 'auto';
+  v.src = URL.createObjectURL(videoFile);
+  v.style.display = 'block';
+  status('영상 로딩 중…(큰 파일은 잠깐)');
+  v.onloadedmetadata = () => {
+    natW = v.videoWidth; natH = v.videoHeight; dur = v.duration || 0;
+    cv.width = 1280; cv.height = Math.round(1280 * natH / natW);
+    $('nav').hidden = $('seek').hidden = $('sharpRow').hidden = $('grabRow').hidden = false;
+    $('exportBar').hidden = false;
+    status(`${videoFile.name} (${natW}x${natH}, ${fmt(dur)}) — 스크럽하며 선명한 보드 프레임을 담으세요`);
+    // iOS Safari 첫 프레임 디코드 트릭(court 피커와 동일)
+    v.play().then(() => v.pause()).catch(() => {});
+    seekTo(Math.min(0.1, dur / 2));
+  };
+});
+
+// ── 시킹: 한 번에 하나만, 끝나면 대기 중 좌표로 재시킹 ──
+function seekTo(t) {
+  t = Math.max(0, Math.min(dur || 0, t));
+  if (seeking) { pendingSeek = t; return; }
+  seeking = true;
+  const v = $('video');
+  v.currentTime = t;
+}
+$('video').addEventListener('seeked', () => {
+  const v = $('video');
+  drawFrame(v);
+  $('seek').value = Math.round((dur ? v.currentTime / dur : 0) * 1000);
+  $('tlabel').textContent = `${fmt(v.currentTime)} / ${fmt(dur)}`;
+  seeking = false;
+  if (pendingSeek != null) { const t = pendingSeek; pendingSeek = null; seekTo(t); }
+});
+
+function drawFrame(v) {
+  frame = frame || document.createElement('canvas');
+  frame.width = natW; frame.height = natH;
+  frame.getContext('2d').drawImage(v, 0, 0, natW, natH);
+  v.style.display = 'none'; cv.style.display = 'block';
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.drawImage(frame, 0, 0, cv.width, cv.height);
+  showSharp(blurScore());
+}
+
+// ── 선명도 = 라플라시안 분산(다운스케일 그레이) ──
+const sc = document.createElement('canvas'); sc.width = 320;
+function blurScore() {
+  if (!frame) return 0;
+  sc.height = Math.round(320 * natH / natW);
+  const g = sc.getContext('2d', { willReadFrequently: true });
+  g.drawImage(frame, 0, 0, sc.width, sc.height);
+  const w = sc.width, h = sc.height;
+  const d = g.getImageData(0, 0, w, h).data;
+  const gray = new Float32Array(w * h);
+  for (let i = 0; i < w * h; i++) gray[i] = 0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2];
+  let mean = 0, n = 0;
+  const lap = new Float32Array(w * h);
+  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+    const i = y * w + x;
+    const L = 4 * gray[i] - gray[i - 1] - gray[i + 1] - gray[i - w] - gray[i + w];
+    lap[i] = L; mean += L; n++;
+  }
+  mean /= n; let v = 0;
+  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+    const dlt = lap[y * w + x] - mean; v += dlt * dlt;
+  }
+  return v / n;
+}
+function showSharp(s) {
+  // 경험적 임계: <60 흐림, 60~150 보통, >150 선명 (해상도/조명따라 상대값)
+  let label, color, frac;
+  if (s < 60) { label = '흐림 ✗ (모션블러 의심)'; color = '#ef4444'; frac = 0.18; }
+  else if (s < 150) { label = '보통'; color = '#f59e0b'; frac = 0.55; }
+  else { label = '선명 ✓'; color = '#22c55e'; frac = 1; }
+  $('sharp').innerHTML = `선명도 <span style="color:${color}">${label}</span> · ${Math.round(s)} ` +
+    `<span class="bar" style="width:${Math.round(80 * frac)}px"></span>`;
+}
+
+// ── 내비게이션 ──
+const step = () => 1 / fps;
+$('prevF').onclick = () => seekTo($('video').currentTime - step());
+$('nextF').onclick = () => seekTo($('video').currentTime + step());
+$('prevS').onclick = () => seekTo($('video').currentTime - 0.5);
+$('nextS').onclick = () => seekTo($('video').currentTime + 0.5);
+$('seek').addEventListener('input', () => seekTo(($('seek').value / 1000) * dur));
+
+// ── 담기 ──
+$('grab').addEventListener('click', () => {
+  if (!frame) return;
+  const t = $('video').currentTime, blur = blurScore();
+  frame.toBlob((blob) => {
+    const thumb = makeThumb();
+    shots.push({ time: t, blur, blob, thumb });
+    renderGrid();
+    status(`담음: ${fmt(t)} (선명도 ${Math.round(blur)}) — 총 ${shots.length}장`);
+  }, 'image/jpeg', 0.95);
+});
+function makeThumb() {
+  const tc = document.createElement('canvas'); tc.width = 220; tc.height = Math.round(220 * natH / natW);
+  tc.getContext('2d').drawImage(frame, 0, 0, tc.width, tc.height);
+  return tc.toDataURL('image/jpeg', 0.7);
+}
+function renderGrid() {
+  $('count').textContent = `담은 프레임 ${shots.length}장` + (shots.length < 15 ? ' (15장 이상 권장)' : ' ✓');
+  const g = $('grid'); g.innerHTML = '';
+  shots.forEach((s, i) => {
+    const d = document.createElement('div'); d.className = 'thumb';
+    const sharp = s.blur < 60 ? '⚠' : '';
+    d.innerHTML = `<img src="${s.thumb}"><div class="meta">${String(i + 1).padStart(2, '0')} · ${fmt(s.time)} · ${Math.round(s.blur)}${sharp}</div>`;
+    const btn = document.createElement('button'); btn.className = 'del'; btn.textContent = '×';
+    btn.onclick = () => { shots.splice(i, 1); renderGrid(); };
+    d.appendChild(btn); g.appendChild(d);
+  });
+}
+
+// ── 의존성 없는 ZIP(STORE 방식) ──
+const crcTable = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; }
+  return t;
+})();
+function crc32(buf) {
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < buf.length; i++) c = crcTable[(c ^ buf[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+function buildZip(files) {                 // files: [{name, data:Uint8Array}]
+  const enc = new TextEncoder();
+  const parts = [], central = []; let offset = 0;
+  const u16 = (n) => [n & 255, (n >>> 8) & 255];
+  const u32 = (n) => [n & 255, (n >>> 8) & 255, (n >>> 16) & 255, (n >>> 24) & 255];
+  for (const f of files) {
+    const name = enc.encode(f.name), crc = crc32(f.data), sz = f.data.length;
+    const local = [...u32(0x04034b50), ...u16(20), ...u16(0), ...u16(0), ...u16(0), ...u16(0),
+      ...u32(crc), ...u32(sz), ...u32(sz), ...u16(name.length), ...u16(0)];
+    parts.push(new Uint8Array(local), name, f.data);
+    central.push({ rec: [...u32(0x02014b50), ...u16(20), ...u16(20), ...u16(0), ...u16(0), ...u16(0), ...u16(0),
+      ...u32(crc), ...u32(sz), ...u32(sz), ...u16(name.length), ...u16(0), ...u16(0), ...u16(0), ...u16(0),
+      ...u32(0), ...u32(offset)], name });
+    offset += local.length + name.length + sz;
+  }
+  const cdStart = offset; const cdParts = [];
+  for (const c of central) { const a = new Uint8Array(c.rec); cdParts.push(a, c.name); offset += a.length + c.name.length; }
+  const cdSize = offset - cdStart;
+  const eocd = new Uint8Array([...u32(0x06054b50), ...u16(0), ...u16(0),
+    ...u16(files.length), ...u16(files.length), ...u32(cdSize), ...u32(cdStart), ...u16(0)]);
+  return new Blob([...parts, ...cdParts, eocd], { type: 'application/zip' });
+}
+
+function baseName() { return (videoFile?.name.replace(/\.[^.]+$/, '') || 'calib'); }
+async function makeZip() {
+  const files = [];
+  for (let i = 0; i < shots.length; i++) {
+    const buf = new Uint8Array(await shots[i].blob.arrayBuffer());
+    files.push({ name: `calib_${String(i + 1).padStart(2, '0')}.jpg`, data: buf });
+  }
+  files.push({ name: 'timestamps.json', data: new TextEncoder().encode(tsJson()) });
+  return buildZip(files);
+}
+function tsJson() {
+  return JSON.stringify({
+    video: videoFile?.name, w: natW, h: natH,
+    frames: shots.map((s, i) => ({ name: `calib_${String(i + 1).padStart(2, '0')}.jpg`, time: +s.time.toFixed(3), blur: Math.round(s.blur) })),
+  }, null, 2);
+}
+function download(blob, name) {
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+}
+$('zip').addEventListener('click', async () => {
+  if (!shots.length) { status('담은 프레임이 없습니다.'); return; }
+  status('ZIP 생성 중…'); download(await makeZip(), baseName() + '_calib.zip');
+  status(`ZIP 다운로드: ${shots.length}장 (압축 풀어 --images 폴더로)`);
+});
+$('ts').addEventListener('click', () => download(new Blob([tsJson()], { type: 'application/json' }), baseName() + '_timestamps.json'));
+$('share').addEventListener('click', async () => {
+  if (!shots.length) return;
+  const f = new File([await makeZip()], baseName() + '_calib.zip', { type: 'application/zip' });
+  if (navigator.canShare && navigator.canShare({ files: [f] })) { try { await navigator.share({ files: [f] }); } catch {} }
+  else status('공유 미지원 — ZIP 다운로드 사용.');
+});
+</script>
+</body>
+</html>
