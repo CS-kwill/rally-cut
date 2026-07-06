@@ -27,13 +27,13 @@
 <body>
 <h1>rally-cut <small>마스킹 피커 — 코트 주변 검출영역(임의 다각형) mask.json</small></h1>
 
-<input id="file" type="file" accept="video/*">
+<input id="file" type="file" accept="video/*,image/*">
 <div class="row">
   <button id="grab" disabled>현재 프레임 찍기</button>
   <button id="undo" class="aux" disabled>되돌리기(점 1개)</button>
   <button id="reset" class="aux" disabled>초기화</button>
   <button id="fit" class="aux" disabled>줌 리셋</button>
-  <span id="status">영상을 선택하세요.</span>
+  <span id="status">영상 또는 이미지를 선택하세요.</span>
 </div>
 <div class="row">
   <label for="loadmask" style="font-size:13px">기존 mask.json 수정(선택):</label>
@@ -75,6 +75,23 @@ function info() { status(`점 ${pts.length}개 — 탭=추가 · 드래그=이�
 $('file').addEventListener('change', (e) => {
   videoFile = e.target.files[0] || null;
   if (!videoFile) return;
+  if (videoFile.type.startsWith('image/')) {   // 이미지 파일 — 프레임 캡처 없이 바로 피킹
+    const img = new Image();
+    img.onload = () => {
+      natW = img.naturalWidth; natH = img.naturalHeight;
+      frame = document.createElement('canvas'); frame.width = natW; frame.height = natH;
+      frame.getContext('2d').drawImage(img, 0, 0, natW, natH);
+      URL.revokeObjectURL(img.src);
+      $('video').style.display = 'none'; $('grab').disabled = true;
+      cv.width = 1280; cv.height = Math.round(1280 * natH / natW); cv.style.display = 'block';
+      fitView(); pts = []; dragIdx = -1;
+      ['undo', 'reset', 'fit', 'loadmask', 'loadcourt'].forEach(id => $(id).disabled = false);
+      status(`${videoFile.name} (${natW}x${natH}) — 이미지 로드 완료, 바로 점을 찍으세요`); render();
+    };
+    img.onerror = () => status('이미지 로드 실패 — 파일 형식을 확인하세요.');
+    img.src = URL.createObjectURL(videoFile);
+    return;
+  }
   const v = $('video');
   v.preload = 'auto'; v.src = URL.createObjectURL(videoFile); v.style.display = 'block';
   status('영상 로딩 중…(큰 파일은 잠깐)');
