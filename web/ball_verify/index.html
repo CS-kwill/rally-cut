@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>rally-cut 공검출 검사기</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { margin:0; font-family: system-ui, sans-serif; }
+  #bar { display:flex; gap:8px; align-items:center; padding:8px; flex-wrap:wrap; }
+  #wrap { width:100%; background:#000; }
+  canvas { display:block; width:100%; height:auto; touch-action:none; user-select:none; -webkit-user-select:none; }
+  button { font-size:16px; padding:10px 14px; border-radius:10px; border:1px solid #888; background:#222; color:#fff; }
+  button.on { background:#16a34a; border-color:#16a34a; }
+  button.bad { background:#dc2626; border-color:#dc2626; }
+  .big { flex:1; min-width:70px; }
+  #status { font-size:14px; opacity:.85; padding:0 8px 10px; }
+  .lg { font-size:13px; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <label class="lg">영상 <input id="vfile" type="file" accept="video/*"></label>
+  <label class="lg">검출CSV <input id="cfile" type="file" accept=".csv"></label>
+  <label class="lg">fps <input id="fps" type="number" value="59.94" step="0.01" style="width:70px"></label>
+</div>
+<div id="bar">
+  <button id="prev" class="big">◀ 이전</button>
+  <button id="next" class="big">다음 ▶</button>
+  <button id="ok" class="big">✔ 맞음(다음)</button>
+  <button id="bad" class="big bad">✘ 공아님</button>
+  <button id="fit" class="big">줌리셋</button>
+  <button id="dl" class="big">검사결과 CSV</button>
+</div>
+<div id="wrap"><canvas id="cv" width="1920" height="1080"></canvas></div>
+<div id="status">영상과 검출 CSV를 불러오세요. (탭=공위치 수정, 우클릭드래그=화면이동, 휠/핀치=확대, ✘=공아님 표시)</div>
+<script>
+const $=id=>document.getElementById(id);
+const cv=$('cv'), ctx=cv.getContext('2d');
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const r1=v=>Math.round(v*10)/10;
+let dets=[], idx=0, verd={}, key='', fps=59.94, seeked=true;
+let view={scale:1,tx:0,ty:0}, fitScale=1;
+const vid=document.createElement('video'); vid.preload='auto'; vid.muted=true;
+
+function curD(){ return dets[idx]; }
+function vd(){ const f=curD().f; return verd[f] || (verd[f]={v:'?',x:curD().x,y:curD().y}); }   // v: ok/bad/? · x,y 수정좌표
+function fitView(){ fitScale=cv.width/1920; view={scale:fitScale,tx:0,ty:0}; }
+
+function status(){
+  const d=curD(); const V=vd();
+  const nok=Object.values(verd).filter(x=>x.v==='ok').length;
+  const nbad=Object.values(verd).filter(x=>x.v==='bad').length;
+  const mark = V.v==='ok'?'✔맞음':(V.v==='bad'?'✘공아님':'미검사');
+  $('status').textContent=`${idx+1}/${dets.length} (frame ${d.f}·${d.zone||''}) · ${mark} · 검사 맞음 ${nok}/공아님 ${nbad} · ${(view.scale/fitScale).toFixed(1)}x`;
+  $('bad').classList.toggle('on', V.v==='bad');
+}
+function ring(x,y,c,baseR,dashed){
+  const r=baseR/view.scale, lw=2.5/view.scale;
+  ctx.strokeStyle=c; ctx.lineWidth=lw;
+  ctx.setLineDash(dashed?[r*0.5,r*0.3]:[]);
+  ctx.beginPath(); ctx.arc(x,y,r,0,7); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x-r,y); ctx.lineTo(x+r,y); ctx.moveTo(x,y-r); ctx.lineTo(x,y+r); ctx.stroke();
+  ctx.setLineDash([]);
+}
+function render(){
+  ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0,cv.width,cv.height);
+  if(!dets.length) return;
+  ctx.setTransform(view.scale,0,0,view.scale,view.tx,view.ty);
+  if(vid.readyState>=2) ctx.drawImage(vid,0,0,1920,1080);
+  const d=curD(), V=verd[d.f];
+  // 검출 시드(노랑) — 공아님이면 빨강, 수정됨이면 초록
+  let col='#facc15';
+  if(V){ if(V.v==='bad') col='#dc2626'; else if(V.v==='ok') col='#22c55e'; }
+  const x=(V&&V.x!=null)?V.x:d.x, y=(V&&V.y!=null)?V.y:d.y;
+  if(V&&V.v==='bad'){ /* 공아님이면 X만 */ ring(x,y,'#dc2626',8,true); }
+  else ring(x,y,col,7,false);
+  ctx.setTransform(1,0,0,1,0,0);
+  status();
+}
+function seek(){
+  seeked=false;
+  vid.currentTime = curD().f / fps;
+}
+vid.addEventListener('seeked', ()=>{ seeked=true; render(); });
+
+function save(){ if(key) localStorage.setItem(key, JSON.stringify(verd)); }
+
+// ---- 좌표 변환 ----
+function toCanvas(ev){ const r=cv.getBoundingClientRect();
+  return { cx:(ev.clientX-r.left)/r.width*cv.width, cy:(ev.clientY-r.top)/r.height*cv.height }; }
+const toImg=(cx,cy)=>({ x:(cx-view.tx)/view.scale, y:(cy-view.ty)/view.scale });
+
+// ---- 포인터: 탭=공위치수정 / 우클릭드래그=팬 / 핀치·휠=줌 (ball_label 재활용) ----
+const ptrs=new Map(); const THRESH=8;
+let mode=null, down=null, downMoved=false, pinch=null, panBase=null;
+const dist=(a,b)=>Math.hypot(a.cx-b.cx,a.cy-b.cy);
+cv.addEventListener('contextmenu', e=>e.preventDefault());
+cv.addEventListener('pointerdown', e=>{
+  if(!dets.length) return;
+  cv.setPointerCapture(e.pointerId);
+  const {cx,cy}=toCanvas(e); ptrs.set(e.pointerId,{cx,cy});
+  if(e.button===2){ down={cx,cy}; mode='pan'; panBase={tx:view.tx,ty:view.ty}; return; }
+  if(ptrs.size===2){
+    const [a,b]=[...ptrs.values()]; const mid={cx:(a.cx+b.cx)/2,cy:(a.cy+b.cy)/2};
+    pinch={baseDist:dist(a,b)||1, baseScale:view.scale, midImg:toImg(mid.cx,mid.cy)}; mode='pinch'; render(); return;
+  }
+  down={cx,cy}; downMoved=false; mode='pending';
+});
+cv.addEventListener('pointermove', e=>{
+  if(!ptrs.has(e.pointerId)) return;
+  const {cx,cy}=toCanvas(e); const prev=ptrs.get(e.pointerId); ptrs.set(e.pointerId,{cx,cy});
+  if(mode==='pan'){ view.tx=panBase.tx+(cx-down.cx); view.ty=panBase.ty+(cy-down.cy); render(); return; }
+  if(mode==='pinch' && ptrs.size>=2){
+    const [a,b]=[...ptrs.values()]; const mid={cx:(a.cx+b.cx)/2,cy:(a.cy+b.cy)/2};
+    view.scale=clamp(pinch.baseScale*dist(a,b)/pinch.baseDist, fitScale*0.5, fitScale*40);
+    view.tx=mid.cx-pinch.midImg.x*view.scale; view.ty=mid.cy-pinch.midImg.y*view.scale; render(); return;
+  }
+  if(mode!=='pending' && mode!=='drag') return;
+  if(!downMoved && Math.hypot(cx-down.cx,cy-down.cy)>THRESH){ downMoved=true; mode='drag'; }
+  if(mode==='drag'){                       // 드래그=검출 위치 수정(맞음 표시)
+    const b=toImg(cx,cy); const V=vd(); V.x=r1(b.x); V.y=r1(b.y); V.v='ok'; save(); render();
+  }
+});
+function endPointer(e){
+  if(mode==='pending' && !downMoved){       // 탭=위치 수정+맞음
+    const img=toImg(down.cx,down.cy); const V=vd(); V.x=r1(img.x); V.y=r1(img.y); V.v='ok'; save();
+  }
+  ptrs.delete(e.pointerId);
+  if(ptrs.size===0) mode=null;
+  render();
+}
+cv.addEventListener('pointerup', endPointer);
+cv.addEventListener('pointercancel', endPointer);
+cv.addEventListener('wheel', e=>{
+  if(!dets.length) return; e.preventDefault();
+  const {cx,cy}=toCanvas(e); const ix=(cx-view.tx)/view.scale, iy=(cy-view.ty)/view.scale;
+  view.scale=clamp(view.scale*(e.deltaY<0?1.15:1/1.15), fitScale*0.5, fitScale*40);
+  view.tx=cx-ix*view.scale; view.ty=cy-iy*view.scale; render();
+}, {passive:false});
+
+$('ok').onclick=()=>{ const V=vd(); V.v='ok'; save(); if(idx<dets.length-1){ idx++; seek(); } else render(); };
+$('bad').onclick=()=>{ const V=vd(); V.v = V.v==='bad'?'?':'bad'; save(); render(); };
+$('fit').onclick=()=>{ fitView(); render(); };
+$('prev').onclick=()=>{ if(idx>0){ idx--; seek(); } };
+$('next').onclick=()=>{ if(idx<dets.length-1){ idx++; seek(); } };
+document.addEventListener('keydown', e=>{
+  if(!dets.length) return;
+  if(e.key==='ArrowRight'||e.key===' ') { $('ok').click(); e.preventDefault(); }
+  else if(e.key==='ArrowLeft') $('prev').click();
+  else if(e.key==='x'||e.key==='X') $('bad').click();
+});
+
+$('vfile').addEventListener('change', ev=>{
+  const f=ev.target.files[0]; if(!f) return;
+  vid.src=URL.createObjectURL(f);
+  vid.onloadeddata=()=>{ if(dets.length){ fitView(); seek(); } $('status').textContent='영상 로드됨: '+f.name+' · 검출 CSV를 불러오세요'; };
+});
+$('cfile').addEventListener('change', ev=>{
+  const f=ev.target.files[0]; if(!f) return;
+  fps=parseFloat($('fps').value)||59.94;
+  const rd=new FileReader();
+  rd.onload=()=>{
+    const lines=rd.result.trim().split(/\r?\n/); const hdr=lines[0].split(',');
+    const fi=hdr.indexOf('frame'), xi=hdr.indexOf('x'), yi=hdr.indexOf('y'), zi=hdr.indexOf('zone');
+    dets=lines.slice(1).map(l=>{ const c=l.split(','); return {f:+c[fi], x:+c[xi], y:+c[yi], zone:zi>=0?c[zi]:''}; })
+              .filter(d=>!isNaN(d.f)).sort((a,b)=>a.f-b.f);
+    key='ballverify_'+f.name; const sv=localStorage.getItem(key); verd = sv?JSON.parse(sv):{};
+    idx=0; fitView();
+    if(vid.readyState>=2) seek();
+    render();
+  };
+  rd.readAsText(f);
+});
+$('dl').onclick=()=>{
+  if(!dets.length) return;
+  const rows=['frame,verdict,x,y'];
+  dets.forEach(d=>{ const V=verd[d.f]||{v:'?'};
+    rows.push([d.f, V.v, V.x!=null?V.x:d.x, V.y!=null?V.y:d.y].join(',')); });
+  const blob=new Blob([rows.join('\n')], {type:'text/csv'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+  a.download='verify_'+(key.replace('ballverify_',''))+'.csv'; a.click();
+};
+</script>
+</body>
+</html>

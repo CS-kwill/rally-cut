@@ -203,13 +203,17 @@ function promoteToKey(f) {
 
 // ---- 포인터: 탭=공위치(키프레임 승격) / 1손가락 드래그=상대 미세이동 / 2손가락=줌+팬 / 휠=줌 ----
 const ptrs=new Map(); const THRESH=8;
-let mode=null, down=null, downMoved=false, pinch=null;
+let mode=null, down=null, downMoved=false, pinch=null, panBase=null;
 const dist=(a,b)=>Math.hypot(a.cx-b.cx,a.cy-b.cy);
 
+cv.addEventListener('contextmenu', e=>e.preventDefault());   // 우클릭=팬 전용(메뉴 차단·코트피커 방식)
 cv.addEventListener('pointerdown', e=>{
   if(!data) return;
   cv.setPointerCapture(e.pointerId);
   const {cx,cy}=toCanvas(e); ptrs.set(e.pointerId,{cx,cy});
+  if(e.button===2){                     // 우클릭 드래그 → 화면 이동(팬) — 좌클릭 점지정과 분리(오너 요청)
+    down={cx,cy}; mode='pan'; panBase={tx:view.tx, ty:view.ty}; return;
+  }
   if(ptrs.size===2){
     const [a,b]=[...ptrs.values()];
     const mid={cx:(a.cx+b.cx)/2, cy:(a.cy+b.cy)/2};
@@ -221,6 +225,9 @@ cv.addEventListener('pointerdown', e=>{
 cv.addEventListener('pointermove', e=>{
   if(!ptrs.has(e.pointerId)) return;
   const {cx,cy}=toCanvas(e); const prev=ptrs.get(e.pointerId); ptrs.set(e.pointerId,{cx,cy});
+  if(mode==='pan'){                     // 우클릭 팬 이동
+    view.tx=panBase.tx+(cx-down.cx); view.ty=panBase.ty+(cy-down.cy); render(); return;
+  }
   if(mode==='pinch' && ptrs.size>=2){
     const [a,b]=[...ptrs.values()];
     const mid={cx:(a.cx+b.cx)/2, cy:(a.cy+b.cy)/2};
