@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>Cut-point 피커 · IMG_2414 (held-out)</title>
+<style>
+  body{margin:0;background:#111;color:#ddd;font:13px/1.4 system-ui,sans-serif}
+  #wrap{max-width:1000px;margin:0 auto;padding:10px}
+  h1{font-size:15px;margin:6px 0}
+  canvas{display:block;background:#000;width:100%}
+  #view{border:1px solid #333}
+  #over,#det{margin-top:6px;height:52px;cursor:pointer}
+  .bar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:8px 0}
+  button{background:#2a2a2a;color:#ddd;border:1px solid #444;border-radius:4px;padding:5px 9px;cursor:pointer}
+  button:hover{background:#3a3a3a}
+  .key{color:#7ab;font-weight:bold}
+  #info{font-family:monospace;color:#9c9}
+  table{border-collapse:collapse;width:100%;margin-top:8px;font-family:monospace}
+  th,td{border:1px solid #333;padding:2px 6px;text-align:right}
+  th{background:#222}
+  tr.sel td{background:#264}
+  td.idx{text-align:center;color:#888}
+  #tips{color:#888;font-size:12px;margin-top:8px}
+  #tips b{color:#7ab}
+  .warn{color:#e88}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <h1>Cut-point 피커 — IMG_2414 (held-out 개봉·핸드픽)</h1>
+  <div class="bar">
+    <input type="file" id="file" accept="video/mp4">
+    <span class="warn" id="need">← 원본 <b>IMG_2333.MOV</b> 선택</span>
+  </div>
+
+  <canvas id="view" width="640" height="488"></canvas>
+  <canvas id="over" width="960" height="52" title="전체 타임라인 — 클릭 이동"></canvas>
+  <canvas id="det"  width="960" height="52" title="상세(±윈도우) — 클릭 이동"></canvas>
+
+  <div class="bar" id="info">—</div>
+
+  <div class="bar">
+    <button id="play">▶ 재생/정지 <span class="key">Space</span></button>
+    <button onclick="step(-1)">◀ 1f <span class="key">←</span></button>
+    <button onclick="step(1)">1f ▶ <span class="key">→</span></button>
+    <button onclick="nudge(-1)">−1s <span class="key">,</span></button>
+    <button onclick="nudge(1)">+1s <span class="key">.</span></button>
+    <button onclick="boundary(-1)">◀경계 <span class="key">[</span></button>
+    <button onclick="boundary(1)">경계▶ <span class="key">]</span></button>
+  </div>
+  <div class="bar">
+    <button onclick="setEdge('start')" style="border-color:#3a6">◤ START=현재 <span class="key">S</span></button>
+    <button onclick="setEdge('end')" style="border-color:#a63">END=현재 ◢ <span class="key">E</span></button>
+    <button onclick="addSeg()">＋구간 추가 <span class="key">A</span></button>
+    <button onclick="splitSeg()">✂ 분할 <span class="key">X</span></button>
+    <button onclick="delSeg()" style="border-color:#a44">🗑 삭제 <span class="key">D</span></button>
+    <button id="exp" onclick="exportGT()" style="border-color:#6a6;margin-left:auto">⬇ pointlog_GT 내보내기</button>
+  </div>
+
+  <table id="tbl"><thead><tr><th>#</th><th>start(s)</th><th>end(s)</th><th>길이</th></tr></thead><tbody></tbody></table>
+
+  <div id="tips">
+    <b>사용법</b>: 각 구간의 <b>실제 시작·끝(죽은시간 경계)</b>을 프레임스텝으로 찾아 <span class="key">S</span>/<span class="key">E</span>로 스냅.
+    구간 행을 클릭해 선택·이동. 놓친 랠리는 <span class="key">A</span>로 추가, 붙은 랠리는 <span class="key">X</span>로 분할, 잘못된 건 <span class="key">D</span> 삭제.
+    끝나면 <b>pointlog_GT 내보내기</b> → JSON 저장(+클립보드 복사). 원본 59.94fps (초 단위 저장·프레임 스텝 30fps 표시).
+  </div>
+</div>
+<script>
+// ---- 빈 시드 (IMG_2333 756.5s · 원본 로드·랠리 구간 A로 처음부터 생성) ----
+const DUR = 756.5133, FPS = 30, VID = "IMG_2333";
+let segs = [];
+let sel = 0;                 // 선택 구간 index
+const WIN = 15;              // 상세 타임라인 반경(초)
+
+const vid = document.createElement('video');
+vid.preload = 'auto';
+const view = document.getElementById('view'), vctx = view.getContext('2d');
+const over = document.getElementById('over'), octx = over.getContext('2d');
+const det  = document.getElementById('det'),  dctx = det.getContext('2d');
+
+document.getElementById('file').onchange = e => {
+  const f = e.target.files[0]; if(!f) return;
+  vid.src = URL.createObjectURL(f);
+  vid.onloadeddata = () => { document.getElementById('need').textContent = '로드됨 · '+f.name;
+    document.getElementById('file').blur(); seek(segs[0].start); renderAll(); };
+};
+
+function fnum(t){return t.toFixed(3);}
+function clamp(t){return Math.max(0,Math.min(DUR,t));}
+function cur(){return vid.currentTime||0;}
+function seek(t){vid.currentTime = clamp(t);}
+function step(d){vid.pause();seek(cur()+d/FPS);}
+function nudge(d){vid.pause();seek(cur()+d);}
+
+// 모든 경계(각 구간 start/end) 정렬 → 이전/다음 이동
+function boundary(dir){
+  vid.pause();
+  const bs=[]; segs.forEach(s=>{bs.push(s.start);bs.push(s.end);}); bs.sort((a,b)=>a-b);
+  const c=cur(), eps=0.02;
+  if(dir>0){for(const b of bs){if(b>c+eps){seek(b);return;}}}
+  else{for(let i=bs.length-1;i>=0;i--){if(bs[i]<c-eps){seek(bs[i]);return;}}}
+}
+
+function setEdge(which){
+  if(!segs[sel])return;
+  segs[sel][which]=+fnum(cur());
+  if(segs[sel].start>segs[sel].end){const a=segs[sel].start;segs[sel].start=segs[sel].end;segs[sel].end=a;}
+  renderAll();
+}
+function addSeg(){
+  const c=cur(); segs.push({start:+fnum(c),end:+fnum(clamp(c+2))});
+  segs.sort((a,b)=>a.start-b.start); buildTable(); renderAll();
+}
+function splitSeg(){
+  const s=segs[sel]; if(!s)return; const c=cur();
+  if(c<=s.start+0.1||c>=s.end-0.1)return;
+  const ne={start:+fnum(c),end:s.end}; s.end=+fnum(c);
+  segs.splice(sel+1,0,ne); buildTable(); renderAll();
+}
+function delSeg(){ if(segs[sel]){segs.splice(sel,1); buildTable(); renderAll();} }
+
+// 타임라인 클릭 → 이동
+over.onclick = e => { vid.pause(); seek(e.offsetX/over.width*DUR); };
+det.onclick = e => { vid.pause(); const c=cur(); seek(c-WIN + e.offsetX/det.width*2*WIN); };
+
+// 키보드
+addEventListener('keydown', e => {
+  if(e.target.matches('input[type=number],input[type=text],[contenteditable]'))return;
+  const k=e.key;
+  if(k===' '){e.preventDefault(); vid.paused?vid.play():vid.pause();}
+  else if(k==='ArrowLeft')step(-1); else if(k==='ArrowRight')step(1);
+  else if(k===',')nudge(-1); else if(k==='.')nudge(1);
+  else if(k==='[')boundary(-1); else if(k===']')boundary(1);
+  else if(k==='s'||k==='S')setEdge('start'); else if(k==='e'||k==='E')setEdge('end');
+  else if(k==='a'||k==='A')addSeg(); else if(k==='x'||k==='X')splitSeg();
+  else if(k==='d'||k==='D')delSeg();
+});
+
+function exportGT(){
+  segs.sort((a,b)=>a.start-b.start);
+  const out={video:VID, dur:DUR, source:"pointlog_GT (handpicked cut points)", n:segs.length,
+             segments:segs.map(s=>({start:+s.start.toFixed(3),end:+s.end.toFixed(3)}))};
+  const txt=JSON.stringify(out);
+  navigator.clipboard&&navigator.clipboard.writeText(txt).catch(()=>{});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([txt],{type:'application/json'}));
+  a.download='pointlog_GT_2415.json'; a.click();
+}
+
+// ---- 렌더 ----
+function tl(ctx,t0,t1){
+  const W=ctx.canvas.width,H=ctx.canvas.height;
+  ctx.clearRect(0,0,W,H); ctx.fillStyle='#181818'; ctx.fillRect(0,0,W,H);
+  const x=t=>(t-t0)/(t1-t0)*W;
+  // 구간 바
+  segs.forEach((s,i)=>{
+    const a=Math.max(x(s.start),0), b=Math.min(x(s.end),W); if(b<0||a>W)return;
+    ctx.fillStyle = i===sel? '#2e6b3e':'#2b4657'; ctx.fillRect(a,14,Math.max(b-a,1),24);
+    const ew=i===sel?3:1;
+    ctx.fillStyle='#3f9'; ctx.fillRect(a,10,ew,32);           // start = 녹색
+    ctx.fillStyle='#f93'; ctx.fillRect(b-ew,10,ew,32);        // end = 주황
+    if(b-a>16){ctx.fillStyle='#cde';ctx.font='10px monospace';ctx.fillText(i,a+2,30);}
+  });
+  // 플레이헤드
+  const px=x(cur()); ctx.strokeStyle='#fff'; ctx.beginPath();ctx.moveTo(px,0);ctx.lineTo(px,H);ctx.stroke();
+  ctx.fillStyle='#666';ctx.font='10px monospace';ctx.fillText(t0.toFixed(0)+'s',2,11);
+  ctx.fillText(t1.toFixed(0)+'s',W-30,11);
+}
+// 편집대상 = 플레이헤드에 가장 가까운 구간(구간 안이면 그 구간)
+function nearestSeg(){let b=0,bd=1e9;const c=cur();
+  segs.forEach((s,i)=>{const d=c<s.start?s.start-c:c>s.end?c-s.end:0;if(d<bd){bd=d;b=i;}});return b;}
+function buildTable(){
+  const tb=document.querySelector('#tbl tbody'); tb.innerHTML='';
+  segs.forEach((s,i)=>{
+    const tr=document.createElement('tr'); tr.dataset.i=i;
+    const idx=document.createElement('td'); idx.className='idx'; idx.textContent=i+' ▶';
+    idx.title='이 구간으로 이동'; idx.onclick=()=>{vid.pause();seek(s.start);};
+    const mk=key=>{const td=document.createElement('td');const inp=document.createElement('input');
+      inp.type='number';inp.step='0.001';inp.value=fnum(s[key]);inp.dataset.key=key;
+      inp.style.cssText='width:74px;background:#111;color:#ad9;border:1px solid #333;text-align:right';
+      inp.onchange=()=>{s[key]=parseFloat(inp.value)||0;};
+      td.appendChild(inp);return td;};
+    const len=document.createElement('td');len.className='len';
+    tr.append(idx,mk('start'),mk('end'),len);
+    tb.appendChild(tr);
+  });
+  syncTable();
+}
+function syncTable(){
+  document.querySelectorAll('#tbl tbody tr').forEach(tr=>{
+    const i=+tr.dataset.i, s=segs[i]; if(!s)return;
+    tr.className = i===sel?'sel':'';
+    tr.querySelectorAll('input').forEach(inp=>{ if(document.activeElement!==inp) inp.value=fnum(s[inp.dataset.key]); });
+    tr.querySelector('.len').textContent=(s.end-s.start).toFixed(1);
+  });
+}
+function renderAll(){
+  sel=nearestSeg();
+  tl(octx,0,DUR); tl(dctx,cur()-WIN,cur()+WIN); syncTable();
+  const s=segs[sel];
+  document.getElementById('info').textContent =
+    `t=${fnum(cur())}s  f=${Math.round(cur()*FPS)}  |  편집대상(초록) #${sel} [${s?fnum(s.start):'-'} → ${s?fnum(s.end):'-'}]  |  구간수 ${segs.length}`;
+}
+
+// video frame → 캔버스 rAF 렌더 (H.264)
+function loop(){
+  if(vid.readyState>=2){
+    const r=view.width/view.height, vr=(vid.videoWidth||640)/(vid.videoHeight||488);
+    vctx.fillStyle='#000';vctx.fillRect(0,0,view.width,view.height);
+    let w=view.width,h=view.width/vr; if(h>view.height){h=view.height;w=view.height*vr;}
+    vctx.drawImage(vid,(view.width-w)/2,(view.height-h)/2,w,h);
+  }
+  renderAll();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+document.getElementById('play').onclick=()=>vid.paused?vid.play():vid.pause();
+buildTable();
+</script>
+</body>
+</html>
