@@ -51,7 +51,17 @@ let view={scale:1,tx:0,ty:0}, fitScale=1;
 function curF(){ return data.frames[idx].f; }
 function lbl(){ const f=curF(); return labels[f] || (labels[f]={present:0,x:null,y:null,bounce:0,contact:0,isKey:false}); }
 function touched(L){ return L.present||L.x!=null||L.bounce||L.contact; }
-function fitView(){ fitScale=cv.width/data.w; view={scale:fitScale,tx:0,ty:0}; }
+function fitView(){
+  // 크롭 팩(가로로 긴 이미지)은 세로 맞춤 기본 — 세로폭 확보(오너 7/13). 일반 팩은 기존 가로 맞춤.
+  if(data.h/data.w < 0.45){
+    fitScale=cv.height/data.h;
+    const fr=data.frames&&data.frames[idx];
+    const cxImg=(fr&&fr.seed)?fr.seed[0]:data.w/2;
+    view={scale:fitScale, tx:clamp(cv.width/2-cxImg*fitScale, cv.width-data.w*fitScale, 0), ty:0};
+  } else {
+    fitScale=cv.width/data.w; view={scale:fitScale,tx:0,ty:0};
+  }
+}
 
 // ---- 키프레임 곡선 보간 (Catmull-Rom 스플라인) ----
 // 순수 함수: labels 객체와 전체 프레임 번호 배열을 받아
@@ -314,14 +324,21 @@ $('file').addEventListener('change', ev=>{
   const f=ev.target.files[0]; if(!f) return;
   const rd=new FileReader();
   rd.onload=()=>{
-    data=JSON.parse(rd.result); idx=0;
+    const parsed=JSON.parse(rd.result);
+    if(!parsed.frames || !parsed.frames.length){
+      alert('팩 JSON이 아닙니다 (pack_index.json은 목록 파일). blabel_2333_rXX.json을 선택하세요.');
+      return;
+    }
+    data=parsed; idx=0;
     key='balllabels_'+(data.video||'vid');
     const saved=localStorage.getItem(key); labels = saved ? JSON.parse(saved) : {};
     // 기존 저장된 라벨에 isKey 필드 없으면 기본값 부여 (하위 호환)
     for (const f in labels) {
       if (labels[f].isKey === undefined) labels[f].isKey = false;
     }
-    cv.width=data.w; cv.height=data.h; fitView();
+    cv.width=data.w;
+    cv.height = (data.h/data.w < 0.45) ? Math.round(data.h*2.2) : data.h;  // 크롭 팩 = 세로 2.2배 캔버스(표시 확대·픽셀 원본 유지)
+    fitView();
     $('endtype').value = localStorage.getItem(key+'_end') || '';
     loadFrame();
   };
