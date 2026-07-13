@@ -30,11 +30,12 @@
   <button id="next" class="big">다음 ▶</button>
   <button id="ok" class="big">✔ 맞음(다음)</button>
   <button id="bad" class="big bad">✘ 공아님</button>
+  <button id="none" class="big bad">공없음</button>
   <button id="fit" class="big">줌리셋</button>
   <button id="dl" class="big">검사결과 CSV</button>
 </div>
 <div id="wrap"><canvas id="cv" width="1920" height="1080"></canvas></div>
-<div id="status">영상과 검출 CSV를 불러오세요. (탭=공위치 수정, 우클릭드래그=화면이동, 휠/핀치=확대, ✘=공아님 표시)</div>
+<div id="status">영상과 검출 CSV를 불러오세요. (탭=공위치 수정 / ✘공아님 후 탭=실공 위치 클릭(파란링)·화면에 공 없으면 [공없음], 우클릭드래그=이동, 휠/핀치=확대)</div>
 <script>
 const $=id=>document.getElementById(id);
 const cv=$('cv'), ctx=cv.getContext('2d');
@@ -45,16 +46,18 @@ let view={scale:1,tx:0,ty:0}, fitScale=1;
 const vid=document.createElement('video'); vid.preload='auto'; vid.muted=true;
 
 function curD(){ return dets[idx]; }
-function vd(){ const f=curD().f; return verd[f] || (verd[f]={v:'?',x:curD().x,y:curD().y}); }   // v: ok/bad/? · x,y 수정좌표
+function vd(){ const f=curD().f; return verd[f] || (verd[f]={v:'?',x:curD().x,y:curD().y,gx:null,gy:null,none:false}); }   // v: ok/bad/? · x,y 수정좌표 · gx,gy=bad시 실공(GT) 클릭 · none=공없음
 function fitView(){ fitScale=cv.width/1920; view={scale:fitScale,tx:0,ty:0}; }
 
 function status(){
   const d=curD(); const V=vd();
   const nok=Object.values(verd).filter(x=>x.v==='ok').length;
   const nbad=Object.values(verd).filter(x=>x.v==='bad').length;
-  const mark = V.v==='ok'?'✔맞음':(V.v==='bad'?'✘공아님':'미검사');
+  let mark = V.v==='ok'?'✔맞음':(V.v==='bad'?'✘공아님':'미검사');
+  if(V.v==='bad') mark += V.none?'·공없음':(V.gx!=null?'·실공기록됨':'·실공 클릭 대기');
   $('status').textContent=`${idx+1}/${dets.length} (frame ${d.f}·${d.zone||''}) · ${mark} · 검사 맞음 ${nok}/공아님 ${nbad} · ${(view.scale/fitScale).toFixed(1)}x`;
   $('bad').classList.toggle('on', V.v==='bad');
+  $('none').classList.toggle('on', V.v==='bad'&&V.none);
 }
 function ring(x,y,c,baseR,dashed){
   const r=baseR/view.scale, lw=2.5/view.scale;
@@ -74,7 +77,10 @@ function render(){
   let col='#facc15';
   if(V){ if(V.v==='bad') col='#dc2626'; else if(V.v==='ok') col='#22c55e'; }
   const x=(V&&V.x!=null)?V.x:d.x, y=(V&&V.y!=null)?V.y:d.y;
-  if(V&&V.v==='bad'){ /* 공아님이면 X만 */ ring(x,y,'#dc2626',8,true); }
+  if(V&&V.v==='bad'){ /* 공아님 = 빨강 점선 + 실공(GT) 클릭 시 파란 실선 */
+    ring(x,y,'#dc2626',8,true);
+    if(V.gx!=null) ring(V.gx,V.gy,'#3b82f6',7,false);
+  }
   else ring(x,y,col,7,false);
   ctx.setTransform(1,0,0,1,0,0);
   status();
@@ -119,13 +125,19 @@ cv.addEventListener('pointermove', e=>{
   }
   if(mode!=='pending' && mode!=='drag') return;
   if(!downMoved && Math.hypot(cx-down.cx,cy-down.cy)>THRESH){ downMoved=true; mode='drag'; }
-  if(mode==='drag'){                       // 드래그=검출 위치 수정(맞음 표시)
-    const b=toImg(cx,cy); const V=vd(); V.x=r1(b.x); V.y=r1(b.y); V.v='ok'; save(); render();
+  if(mode==='drag'){                       // 드래그: bad면 실공(GT) 위치 / 아니면 검출 수정(맞음)
+    const b=toImg(cx,cy); const V=vd();
+    if(V.v==='bad'){ V.gx=r1(b.x); V.gy=r1(b.y); V.none=false; }
+    else { V.x=r1(b.x); V.y=r1(b.y); V.v='ok'; }
+    save(); render();
   }
 });
 function endPointer(e){
-  if(mode==='pending' && !downMoved){       // 탭=위치 수정+맞음
-    const img=toImg(down.cx,down.cy); const V=vd(); V.x=r1(img.x); V.y=r1(img.y); V.v='ok'; save();
+  if(mode==='pending' && !downMoved){       // 탭: bad면 실공(GT) 클릭 / 아니면 위치 수정+맞음
+    const img=toImg(down.cx,down.cy); const V=vd();
+    if(V.v==='bad'){ V.gx=r1(img.x); V.gy=r1(img.y); V.none=false; }
+    else { V.x=r1(img.x); V.y=r1(img.y); V.v='ok'; }
+    save();
   }
   ptrs.delete(e.pointerId);
   if(ptrs.size===0) mode=null;
@@ -141,7 +153,8 @@ cv.addEventListener('wheel', e=>{
 }, {passive:false});
 
 $('ok').onclick=()=>{ const V=vd(); V.v='ok'; save(); if(idx<dets.length-1){ idx++; seek(); } else render(); };
-$('bad').onclick=()=>{ const V=vd(); V.v = V.v==='bad'?'?':'bad'; save(); render(); };
+$('bad').onclick=()=>{ const V=vd(); V.v = V.v==='bad'?'?':'bad'; if(V.v!=='bad'){ V.gx=V.gy=null; V.none=false; } save(); render(); };
+$('none').onclick=()=>{ const V=vd(); V.v='bad'; V.none=!V.none; if(V.none){ V.gx=V.gy=null; } save(); render(); };
 $('fit').onclick=()=>{ fitView(); render(); };
 $('prev').onclick=()=>{ if(idx>0){ idx--; seek(); } };
 $('next').onclick=()=>{ if(idx<dets.length-1){ idx++; seek(); } };
@@ -150,6 +163,7 @@ document.addEventListener('keydown', e=>{
   if(e.key==='ArrowRight'||e.key===' ') { $('ok').click(); e.preventDefault(); }
   else if(e.key==='ArrowLeft') $('prev').click();
   else if(e.key==='x'||e.key==='X') $('bad').click();
+  else if(e.key==='n'||e.key==='N') $('none').click();
 });
 
 $('vfile').addEventListener('change', ev=>{
@@ -175,9 +189,13 @@ $('cfile').addEventListener('change', ev=>{
 });
 $('dl').onclick=()=>{
   if(!dets.length) return;
-  const rows=['frame,verdict,x,y'];
+  // 스키마(검토자 7/13): det=원 검출 좌표 · gt=실공 좌표(ok=수정 반영 좌표·bad=파란링 클릭·공없음=none·미기록=공란)
+  const rows=['frame,verdict,det_x,det_y,gt_x,gt_y'];
   dets.forEach(d=>{ const V=verd[d.f]||{v:'?'};
-    rows.push([d.f, V.v, V.x!=null?V.x:d.x, V.y!=null?V.y:d.y].join(',')); });
+    let gx='', gy='';
+    if(V.v==='ok'){ gx=V.x!=null?V.x:d.x; gy=V.y!=null?V.y:d.y; }
+    else if(V.v==='bad'){ if(V.none){ gx='none'; gy='none'; } else if(V.gx!=null){ gx=V.gx; gy=V.gy; } }
+    rows.push([d.f, V.v, d.x, d.y, gx, gy].join(',')); });
   const blob=new Blob([rows.join('\n')], {type:'text/csv'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
   a.download='verify_'+(key.replace('ballverify_',''))+'.csv'; a.click();
