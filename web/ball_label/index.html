@@ -23,6 +23,7 @@
 <body>
 <div id="bar">
   <input id="file" type="file" accept=".json,application/json">
+  <label class="lg" style="font-size:13px">CSV 로드 <input id="csvfile" type="file" accept=".csv,text/csv"></label>
   <button id="prev" class="big">◀ 이전</button>
   <button id="next" class="big">다음 ▶</button>
   <button id="none" class="big">공없음</button>
@@ -360,6 +361,53 @@ $('file').addEventListener('change', ev=>{
   rd.readAsText(f);
 });
 $('endtype').addEventListener('change', ()=>{ if(key) localStorage.setItem(key+'_end', $('endtype').value); });
+// CSV 로드(사생활보호창 유실 복구용): frame,x,y,tag,end_type 복원 + 키프레임 자동 복원
+// (CR 역-RDP: [처음,끝]에서 시작해 보간 재현오차 >0.35px인 점을 키로 승격 반복 — 보간 저장분이면 원래 키를 복원)
+function detectKeys(){
+  const allF=data.frames.map(fr=>fr.f);
+  const lf=allF.filter(f=>labels[f]&&labels[f].present&&labels[f].x!=null);
+  if(lf.length<3){ lf.forEach(f=>labels[f].isKey=true); return lf.length; }
+  lf.forEach(f=>labels[f].isKey=false);
+  labels[lf[0]].isKey=true; labels[lf[lf.length-1]].isKey=true;
+  for(let iter=0;iter<lf.length;iter++){
+    const interped=interpolateTrack(labels, allF);
+    let worst=null, wd=0.35;
+    for(const f of lf){
+      if(labels[f].isKey) continue;
+      const v=interped[f];
+      const d=v?Math.hypot(v.x-labels[f].x, v.y-labels[f].y):1e9;
+      if(d>wd){ wd=d; worst=f; }
+    }
+    if(worst==null) break;
+    labels[worst].isKey=true;
+  }
+  return lf.filter(f=>labels[f].isKey).length;
+}
+$('csvfile').addEventListener('change', ev=>{
+  const f=ev.target.files[0]; if(!f) return;
+  if(!data){ alert('팩 JSON을 먼저 불러오세요.'); ev.target.value=''; return; }
+  const rd=new FileReader();
+  rd.onload=()=>{
+    const lines=rd.result.trim().split(/\r?\n/).filter(l=>l&&!l.startsWith('#'));
+    const hdr=lines[0].split(',');
+    const fi=hdr.indexOf('frame'), xi=hdr.indexOf('x'), yi=hdr.indexOf('y'), ti=hdr.indexOf('tag'), ei=hdr.indexOf('end_type');
+    let n=0, et='';
+    lines.slice(1).forEach(l=>{
+      const c=l.split(',');
+      const fr=+c[fi]; if(isNaN(fr)) return;
+      labels[fr]={present:1, x:+c[xi], y:+c[yi],
+                  bounce:(ti>=0&&c[ti]==='bounce')?1:0, contact:(ti>=0&&c[ti]==='impact')?1:0, isKey:false};
+      if(ei>=0&&c[ei]) et=c[ei];
+      n++;
+    });
+    const kc=detectKeys();
+    if(et){ $('endtype').value=et; if(key) localStorage.setItem(key+'_end', et); }
+    save(); render();
+    alert(`CSV ${n}점 로드 · 키프레임 자동 복원 ${kc}개 (초록=키·하늘=보간). [보간 지우기]→[CSV 저장]으로 키만 남길 수 있습니다.`);
+    ev.target.value='';
+  };
+  rd.readAsText(f);
+});
 // 태그 체계(검토자 7/13): tag = impact(임팩트·첫 임팩트=서브) > bounce(바운스) > ball. end_type = 팩(랠리) 단위 택1 — 전 행 반복 기록.
 function csvText(){
   const et=$('endtype').value;
