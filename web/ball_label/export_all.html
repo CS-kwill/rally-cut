@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rally-cut 라벨 전체 내보내기</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 720px; margin: 24px auto; padding: 0 12px; }
+  button { font-size: 18px; padding: 14px 20px; border-radius: 12px; border: 1px solid #888; background: #2563eb; color: #fff; }
+  pre { background: #1112; padding: 10px; border-radius: 8px; font-size: 13px; overflow-x: auto; }
+</style>
+</head>
+<body>
+<h2>라벨 전체 내보내기 (키프레임 구분 포함)</h2>
+<p>이 브라우저에 저장된 <b>모든 팩 라벨</b>(balllabels_*)을 키프레임(isKey)·태그·종료유형까지 통째로 JSON 한 파일로 내려받습니다. 라벨링에 쓴 <b>같은 브라우저</b>에서 열어야 합니다.</p>
+<button id="dump">전체 라벨 JSON 다운로드</button>
+<pre id="out">대기 중…</pre>
+<script>
+document.getElementById('dump').onclick = () => {
+  const all = {};
+  let packs = 0, pts = 0, keys = 0;
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (!k.startsWith('balllabels_')) continue;
+    try {
+      const labels = JSON.parse(localStorage.getItem(k));
+      const end = localStorage.getItem(k + '_end') || '';
+      all[k] = { end_type: end, labels };
+      packs++;
+      for (const f in labels) {
+        const L = labels[f];
+        if (L.present && L.x != null) { pts++; if (L.isKey) keys++; }
+      }
+    } catch (e) {}
+  }
+  const blob = new Blob([JSON.stringify(all)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'balllabels_all_dump.json';
+  a.click();
+  document.getElementById('out').textContent =
+    `팩 ${packs}개 · 라벨점 ${pts} · 키프레임 ${keys} — balllabels_all_dump.json 저장됨. 파일을 보내주세요.`;
+};
+</script>
+</body>
+</html>
