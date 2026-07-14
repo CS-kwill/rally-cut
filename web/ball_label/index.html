@@ -30,6 +30,7 @@
   <button id="contact" class="big">임팩트(I)</button>
   <button id="fit" class="big">줌리셋</button>
   <button id="interp" class="big key-btn">보간 실행</button>
+  <button id="uninterp" class="big">보간 지우기</button>
   <select id="endtype" class="big" style="font-size:15px;padding:10px;border-radius:10px;background:#222;color:#fff;border:1px solid #888">
     <option value="">종료유형 선택</option>
     <option>첫서브폴트(아웃)</option><option>첫서브폴트(네트)</option>
@@ -320,6 +321,17 @@ $('interp').onclick=()=>{
   const count = applyInterpolation();
   render();
   alert(`보간 완료: ${count}개 프레임 채움 (키프레임 ${kc}개)`);
+};
+// 보간 지우기: 보간점(하늘색·비Key)만 삭제 — 키프레임(초록)·바운스/임팩트 태그 라벨은 보존
+$('uninterp').onclick=()=>{
+  if(!data) return;
+  let n=0;
+  for(const f of Object.keys(labels)){
+    const L=labels[f];
+    if(!L.isKey && L.present && L.x!=null && !L.bounce && !L.contact){ delete labels[f]; n++; }
+  }
+  save(); render();
+  alert(`보간점 ${n}개 삭제 (키프레임·태그 라벨은 유지). 키프레임 수정 후 [보간 실행]을 다시 누르세요.`);
 };
 
 $('file').addEventListener('change', ev=>{
