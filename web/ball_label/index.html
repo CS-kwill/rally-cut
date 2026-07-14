@@ -39,6 +39,7 @@
     <option>2바운드</option><option>레트</option><option>기타</option>
   </select>
   <button id="dl" class="big">CSV 저장</button>
+  <button id="copy" class="big">복사</button>
 </div>
 <div id="wrap"><canvas id="cv"></canvas></div>
 <div id="status">JSON을 불러오세요. (탭=공 위치·키프레임은 궤적 꺾임점 위주로 찍으면 보간이 정확 / B=바운스·I=임팩트(첫 임팩트=서브) / 랠리 끝나면 종료유형 택1 / 핀치·휠=확대)</div>
@@ -347,19 +348,30 @@ $('file').addEventListener('change', ev=>{
 });
 $('endtype').addEventListener('change', ()=>{ if(key) localStorage.setItem(key+'_end', $('endtype').value); });
 // 태그 체계(검토자 7/13): tag = impact(임팩트·첫 임팩트=서브) > bounce(바운스) > ball. end_type = 팩(랠리) 단위 택1 — 전 행 반복 기록.
-$('dl').onclick=()=>{
-  if(!data) return;
+function csvText(){
   const et=$('endtype').value;
-  if(!et && !confirm('종료유형이 미선택입니다. 그대로 저장할까요?')) return;
   const rows=['frame,x,y,tag,end_type'];
   Object.keys(labels).map(Number).sort((a,b)=>a-b).forEach(f=>{
     const L=labels[f]; if(!L.present || L.x==null) return;
     const tag = L.contact?'impact':(L.bounce?'bounce':'ball');
     rows.push([f, L.x, L.y, tag, et].join(','));
   });
-  const blob=new Blob([rows.join('\n')], {type:'text/csv'});
+  return {et, text:'# '+(data.video||'vid')+'\n'+rows.join('\n')};
+}
+$('dl').onclick=()=>{
+  if(!data) return;
+  const {et, text}=csvText();
+  if(!et && !confirm('종료유형이 미선택입니다. 그대로 저장할까요?')) return;
+  const blob=new Blob([text], {type:'text/csv'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
   a.download='ball_gt_'+(data.video||'vid')+'.csv'; a.click();
+};
+$('copy').onclick=async()=>{
+  if(!data) return;
+  const {et, text}=csvText();
+  if(!et && !confirm('종료유형이 미선택입니다. 그대로 복사할까요?')) return;
+  try{ await navigator.clipboard.writeText(text); alert('복사 완료 ('+(text.split('\n').length-2)+'행)'); }
+  catch(e){ prompt('아래 텍스트를 복사하세요', text); }
 };
 document.addEventListener('keydown', e=>{
   if(!data || e.target.tagName==='SELECT') return;
