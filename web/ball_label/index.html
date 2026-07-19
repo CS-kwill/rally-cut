@@ -212,7 +212,12 @@ function render(){
   ctx.setTransform(view.scale,0,0,view.scale,view.tx,view.ty);
   if(curImg && curImg.complete) ctx.drawImage(curImg,0,0,data.w,data.h);
   const fr=data.frames[idx];
-  if(fr.seed) ring(fr.seed[0],fr.seed[1],'#facc15',6);   // 검출 시드(노랑)
+  // ★시드 표시 잠정 보정(검토자 지시 7/19): 검출 축 계통 오프셋 실측 −2프레임(빠른 공 21.3px 최적)
+  //   → stride 2 팩(blabel_2329_full)은 "다음 타일의 시드" = 정확히 −2 보정. 감사 확정 후 정식 상수화.
+  //   시드는 표시 보조일 뿐 라벨 데이터와 무관(빠른 공은 보정 후에도 다소 벗어날 수 있음 — 실물 우선).
+  const seedShift=(data.stride===2 && (data.video||'').includes('2329')) ? 1 : 0;
+  const seedFr=data.frames[idx+seedShift] || fr;
+  if(seedFr.seed) ring(seedFr.seed[0],seedFr.seed[1],'#facc15',6);   // 검출 시드(노랑·보정 표시)
   const L=labels[fr.f];
   if(L && L.present && L.x!=null){
     if(L.isKey){
