@@ -29,6 +29,11 @@
   <button id="none" class="big">공없음</button>
   <button id="bounce" class="big">바운스(B)</button>
   <button id="contact" class="big">임팩트(I)</button>
+  <select id="impacttype" class="big" style="font-size:15px;padding:10px;border-radius:10px;background:#222;color:#fff;border:1px solid #888">
+    <option value="">임팩트 유형(1~5)</option>
+    <option>서브</option><option>언더피드</option><option>발리</option>
+    <option>FH</option><option>BH</option>
+  </select>
   <button id="fit" class="big">줌리셋</button>
   <button id="interp" class="big key-btn">보간 실행</button>
   <button id="uninterp" class="big">보간 지우기</button>
@@ -185,6 +190,9 @@ function status(){
     +`present=${L.present} ${isK} ${L.bounce?'바운스 ':''}${L.contact?('임팩트'+(L.impact_type?'['+L.impact_type+']':'[유형? 1~5]')+' '):''}· ${(view.scale/fitScale).toFixed(1)}x`;
   $('bounce').classList.toggle('on', !!L.bounce);
   $('contact').classList.toggle('on', !!L.contact);
+  // ★임팩트 유형 셀렉트 = 현재 프레임 값 상시 반영(오너 7/19 — 돌아와도 확인 가능)
+  $('impacttype').value = L.contact ? (L.impact_type||'') : '';
+  $('impacttype').style.borderColor = (L.contact && !L.impact_type) ? '#f59e0b' : '#888';
   $('interp').textContent = `보간 실행 (키${kc})`;
 }
 function ring(x,y,c,baseR, dashed){
@@ -213,6 +221,14 @@ function render(){
     } else {
       // 보간 프레임: 점선 + 반투명 하늘색
       ring(L.x,L.y,'#38bdf8',9, true);
+    }
+    // ★임팩트 프레임 배지: 유형(또는 유형 미선택 경고)을 공 옆에 상시 표시(오너 7/19)
+    if(L.contact){
+      const fs=16/view.scale, r=12/view.scale;
+      ctx.font=`bold ${fs}px system-ui`;
+      const txt='임팩트 '+(L.impact_type||'⚠유형?');
+      ctx.lineWidth=3/view.scale; ctx.strokeStyle='#000'; ctx.strokeText(txt, L.x+r, L.y-r);
+      ctx.fillStyle=L.impact_type?'#f97316':'#f59e0b'; ctx.fillText(txt, L.x+r, L.y-r);
     }
   }
   ctx.setTransform(1,0,0,1,0,0);
@@ -315,16 +331,21 @@ $('none').onclick=()=>{
   save(); render();
 };
 $('bounce').onclick=()=>{ const L=lbl(); L.bounce=L.bounce?0:1; save(); render(); };
-// ★임팩트 유형(검토자 확장 7/19): I(임팩트) 후 숫자키 1~5 = 스윙 유형(clf 5클래스 동일)
+// ★임팩트 유형(검토자 확장 7/19·오너 UI 개선): I(임팩트) 후 숫자 1~5 또는 셀렉트로 선택 —
+// 셀렉트가 현재 프레임 값을 상시 표시(돌아와도 확인·캔버스 배지 병행).
 const IMPACT_TYPES={1:'서브',2:'언더피드',3:'발리',4:'FH',5:'BH'};
-let awaitType=false;
 $('contact').onclick=()=>{
   const L=lbl(); L.contact=L.contact?0:1;
-  if(!L.contact){ L.impact_type=''; awaitType=false; }
-  else awaitType=true;
+  if(!L.contact) L.impact_type='';
   save(); render();
-  if(L.contact) $('status').textContent += ' — ★유형 숫자키: 1 서브 · 2 언더/피드 · 3 발리 · 4 FH · 5 BH';
+  if(L.contact) $('status').textContent += ' — ★유형: 숫자키 1 서브 · 2 언더/피드 · 3 발리 · 4 FH · 5 BH (또는 위 셀렉트)';
 };
+$('impacttype').addEventListener('change', ()=>{
+  const v=$('impacttype').value; const L=lbl();
+  if(v){ L.contact=1; L.impact_type=v; }      // 유형 선택 = 임팩트 표시까지 한 번에
+  else if(L.contact){ L.impact_type=''; }     // 빈 값 = 유형만 해제(임팩트 유지)
+  save(); render();
+});
 $('fit').onclick=()=>{ if(data){ fitView(); render(); } };
 $('prev').onclick=()=>{ if(data){ idx=Math.max(0,idx-1); loadFrame(); } };
 $('next').onclick=()=>{ if(data){ idx=Math.min(data.frames.length-1,idx+1); loadFrame(); } };
@@ -474,9 +495,9 @@ document.addEventListener('keydown', e=>{
   else if(e.key==='n'||e.key==='N') $('none').click();
   else if(e.key==='ArrowLeft') $('prev').click();
   else if(e.key==='ArrowRight') $('next').click();
-  else if(awaitType && '12345'.includes(e.key)){
+  else if('12345'.includes(e.key)){
     const L=lbl();
-    if(L.contact){ L.impact_type=IMPACT_TYPES[Number(e.key)]; awaitType=false; save(); render(); }
+    if(L.contact){ L.impact_type=IMPACT_TYPES[Number(e.key)]; save(); render(); }  // 임팩트 프레임이면 언제든 유형 변경 가능
   }
 });
 </script>
