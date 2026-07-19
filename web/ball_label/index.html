@@ -54,8 +54,8 @@ let data=null, idx=0, labels={}, key='', curImg=null;
 let view={scale:1,tx:0,ty:0}, fitScale=1;
 
 function curF(){ return data.frames[idx].f; }
-function lbl(){ const f=curF(); return labels[f] || (labels[f]={present:0,x:null,y:null,bounce:0,contact:0,isKey:false}); }
-function touched(L){ return L.present||L.x!=null||L.bounce||L.contact; }
+function lbl(){ const f=curF(); return labels[f] || (labels[f]={present:0,x:null,y:null,bounce:0,contact:0,impact_type:'',isKey:false,none:false}); }
+function touched(L){ return L.present||L.x!=null||L.bounce||L.contact||L.impact_type; }
 function fitView(){
   // 크롭 팩(가로로 긴 이미지)은 세로 맞춤 기본 — 세로폭 확보(오너 7/13). 일반 팩은 기존 가로 맞춤.
   if(data.h/data.w < 0.45){
@@ -82,6 +82,21 @@ function catmullRom(p0, p1, p2, p3, t) {
     + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2
     + (-p0 + 3 * p1 - 3 * p2 + p3) * t3);
 }
+// ★공없음(배리어): 오너 지시 2026-07-19 — 높은 공이 화면 밖으로 사라진 구간은
+// 앞뒤 키프레임 사이라도 보간하면 안 됨. "공없음"으로 명시된 프레임이 사이에 있으면
+// 그 키프레임 쌍 구간은 보간을 건너뜀(배리어). 구 저장 라벨(present=0·none 필드 없음)도
+// 공없음 버튼으로만 생겼으므로 배리어로 인정(하위 호환).
+function isBarrier(L){
+  if(!L) return false;
+  if(L.none === true) return true;
+  return L.none === undefined && L.present === 0 && L.x == null && !L.bounce && !L.contact;
+}
+function spanBlocked(labels, frameNums, fa, fb){
+  for (const f of frameNums) {
+    if (f > fa && f < fb && isBarrier(labels[f])) return true;
+  }
+  return false;
+}
 function interpolateTrack(labels, frameNums) {
   const kf = frameNums
     .filter(f => labels[f] && labels[f].isKey && labels[f].x != null)
@@ -91,9 +106,10 @@ function interpolateTrack(labels, frameNums) {
   const r1 = v => Math.round(v * 10) / 10;
   const result = {};
 
-  // 키프레임 2개 → 선형(폴백)
+  // 키프레임 2개 → 선형(폴백) — ★배리어 구간 스킵
   if (kf.length === 2) {
     const a = kf[0], b = kf[1];
+    if (spanBlocked(labels, frameNums, a.f, b.f)) return {};
     for (const f of frameNums.filter(f => f > a.f && f < b.f)) {
       const t = (f - a.f) / (b.f - a.f);
       result[f] = { present:1, x:r1(a.x+(b.x-a.x)*t), y:r1(a.y+(b.y-a.y)*t), isKey:false };
@@ -101,10 +117,11 @@ function interpolateTrack(labels, frameNums) {
     return result;
   }
 
-  // 키프레임 3개 이상 → Catmull-Rom 곡선
+  // 키프레임 3개 이상 → Catmull-Rom 곡선(구간별·★배리어 구간 스킵)
   // 각 구간 [kf[i], kf[i+1]]: P1=kf[i], P2=kf[i+1], P0/P3=인접 키프레임(끝은 복제).
   for (let i = 0; i < kf.length - 1; i++) {
     const p1 = kf[i], p2 = kf[i + 1];
+    if (spanBlocked(labels, frameNums, p1.f, p2.f)) continue;   // ★공없음 배리어
     // 끝 구간은 선형 외삽으로 가상 제어점 생성(직선 키프레임이면 완벽한 직선 보존).
     const p0 = (i > 0) ? kf[i - 1] : { x: 2 * p1.x - p2.x, y: 2 * p1.y - p2.y };
     const p3 = (i + 2 < kf.length) ? kf[i + 2] : { x: 2 * p2.x - p1.x, y: 2 * p2.y - p1.y };
@@ -121,30 +138,39 @@ function interpolateTrack(labels, frameNums) {
   return result;
 }
 
-// 보간 실행: labels에 반영 (기존 isKey 프레임 보존, 비Key 프레임 덮어쓰기)
+// 재보간 공통: 새 보간 결과에 없는 기존 자동 보간 라벨(비Key·present=1)을 정리 —
+// 배리어 추가로 무효가 된 구 보간이 남지 않게. 태그(바운스/임팩트/유형)는 보존.
+function mergeInterp(interped){
+  const inNew = new Set(Object.keys(interped).map(Number));
+  for (const fStr of Object.keys(labels)) {
+    const f = Number(fStr); const L = labels[f];
+    if (L.isKey || isBarrier(L)) continue;
+    if (L.present === 1 && L.x != null && !inNew.has(f)) {
+      if (L.bounce || L.contact || L.impact_type) {
+        labels[f] = { present:0, x:null, y:null, bounce:L.bounce||0, contact:L.contact||0,
+                      impact_type:L.impact_type||'', isKey:false, none:false };
+      } else { delete labels[f]; }
+    }
+  }
+  for (const [fStr, v] of Object.entries(interped)) {
+    const f = Number(fStr);
+    const existing = labels[f];
+    if (existing && existing.isKey) continue;
+    if (isBarrier(existing)) continue;                 // 배리어는 보간이 덮지 않음
+    labels[f] = { present:v.present, x:v.x, y:v.y,
+      bounce:(existing && existing.bounce) || 0, contact:(existing && existing.contact) || 0,
+      impact_type:(existing && existing.impact_type) || '', isKey:false, none:false };
+  }
+}
+
+// 보간 실행: labels에 반영 (기존 isKey 보존·★배리어 구간 스킵·무효 구 보간 정리)
 function applyInterpolation() {
   if (!data) return 0;
   const allF = data.frames.map(fr => fr.f);
   const interped = interpolateTrack(labels, allF);
-  let count = 0;
-  for (const [fStr, v] of Object.entries(interped)) {
-    const f = Number(fStr);
-    const existing = labels[f];
-    // 이미 키프레임인 경우 건드리지 않음
-    if (existing && existing.isKey) continue;
-    // bounce/contact는 기존 값 보존
-    labels[f] = {
-      present: v.present,
-      x: v.x,
-      y: v.y,
-      bounce: (existing && existing.bounce) || 0,
-      contact: (existing && existing.contact) || 0,
-      isKey: false,
-    };
-    count++;
-  }
+  mergeInterp(interped);
   save();
-  return count;
+  return Object.keys(interped).length;
 }
 
 function keyframeCount() {
@@ -154,9 +180,9 @@ function keyframeCount() {
 function status(){
   const L=lbl(); const n=Object.values(labels).filter(touched).length;
   const kc = keyframeCount();
-  const isK = L.isKey ? '🔑키' : (L.present && L.x!=null ? '⬤보간' : '');
+  const isK = L.isKey ? '🔑키' : (L.present && L.x!=null ? '⬤보간' : (isBarrier(L)?'⛔공없음(보간차단)':''));
   $('status').textContent=`${idx+1}/${data.frames.length} (frame ${curF()}) · 라벨 ${n} · 키프레임 ${kc} · `
-    +`present=${L.present} ${isK} ${L.bounce?'바운스 ':''}${L.contact?'타구':''} · ${(view.scale/fitScale).toFixed(1)}x`;
+    +`present=${L.present} ${isK} ${L.bounce?'바운스 ':''}${L.contact?('임팩트'+(L.impact_type?'['+L.impact_type+']':'[유형? 1~5]')+' '):''}· ${(view.scale/fitScale).toFixed(1)}x`;
   $('bounce').classList.toggle('on', !!L.bounce);
   $('contact').classList.toggle('on', !!L.contact);
   $('interp').textContent = `보간 실행 (키${kc})`;
@@ -201,26 +227,12 @@ function toCanvas(ev){ const r=cv.getBoundingClientRect();
 const toImg=(cx,cy)=>({ x:(cx-view.tx)/view.scale, y:(cy-view.ty)/view.scale });
 const r1=v=>Math.round(v*10)/10;
 
-// 클릭/드래그 후 해당 프레임을 키프레임으로 승격하고 인접 구간 재보간
+// 클릭/드래그 후 해당 프레임을 키프레임으로 승격하고 인접 구간 재보간(★배리어 존중)
 function promoteToKey(f) {
   if (!labels[f]) return;
   labels[f].isKey = true;
-  // 재보간
-  const allF = data.frames.map(fr => fr.f);
-  const interped = interpolateTrack(labels, allF);
-  for (const [fStr, v] of Object.entries(interped)) {
-    const ff = Number(fStr);
-    if (labels[ff] && labels[ff].isKey) continue;
-    const existing = labels[ff] || {};
-    labels[ff] = {
-      present: v.present,
-      x: v.x,
-      y: v.y,
-      bounce: existing.bounce || 0,
-      contact: existing.contact || 0,
-      isKey: false,
-    };
-  }
+  labels[f].none = false;
+  mergeInterp(interpolateTrack(labels, data.frames.map(fr => fr.f)));
 }
 
 // ---- 포인터: 탭=공위치(키프레임 승격) / 1손가락 드래그=상대 미세이동 / 2손가락=줌+팬 / 휠=줌 ----
@@ -295,23 +307,24 @@ cv.addEventListener('wheel', e=>{
 }, {passive:false});
 
 $('none').onclick=()=>{
-  const f=curF(); const L=lbl();
-  L.present=0; L.x=null; L.y=null; L.isKey=false;
-  // present=0 토글 시 해당 프레임의 보간된 이웃 재보간
-  const allF = data.frames.map(fr => fr.f);
-  const interped = interpolateTrack(labels, allF);
-  // 이 프레임이 키프레임이었다면, 이웃 보간 결과 업데이트
-  for (const [fStr, v] of Object.entries(interped)) {
-    const ff = Number(fStr);
-    if (labels[ff] && labels[ff].isKey) continue;
-    const existing = labels[ff] || {};
-    labels[ff] = { present:v.present, x:v.x, y:v.y,
-      bounce: existing.bounce||0, contact: existing.contact||0, isKey:false };
-  }
+  const L=lbl();
+  // ★공없음 = 명시 배리어(none:true·오너 지시 7/19) — 이 프레임을 가로지르는 보간 금지
+  //   (높은 공이 화면 위로 사라진 구간에 찍으면 그 구간 보간이 차단·기존 무효 보간은 정리됨)
+  L.present=0; L.x=null; L.y=null; L.isKey=false; L.none=true;
+  mergeInterp(interpolateTrack(labels, data.frames.map(fr => fr.f)));
   save(); render();
 };
 $('bounce').onclick=()=>{ const L=lbl(); L.bounce=L.bounce?0:1; save(); render(); };
-$('contact').onclick=()=>{ const L=lbl(); L.contact=L.contact?0:1; save(); render(); };
+// ★임팩트 유형(검토자 확장 7/19): I(임팩트) 후 숫자키 1~5 = 스윙 유형(clf 5클래스 동일)
+const IMPACT_TYPES={1:'서브',2:'언더피드',3:'발리',4:'FH',5:'BH'};
+let awaitType=false;
+$('contact').onclick=()=>{
+  const L=lbl(); L.contact=L.contact?0:1;
+  if(!L.contact){ L.impact_type=''; awaitType=false; }
+  else awaitType=true;
+  save(); render();
+  if(L.contact) $('status').textContent += ' — ★유형 숫자키: 1 서브 · 2 언더/피드 · 3 발리 · 4 FH · 5 BH';
+};
 $('fit').onclick=()=>{ if(data){ fitView(); render(); } };
 $('prev').onclick=()=>{ if(data){ idx=Math.max(0,idx-1); loadFrame(); } };
 $('next').onclick=()=>{ if(data){ idx=Math.min(data.frames.length-1,idx+1); loadFrame(); } };
@@ -346,17 +359,28 @@ $('file').addEventListener('change', ev=>{
       return;
     }
     data=parsed; idx=0;
-    key='balllabels_'+(data.video||'vid');
+    // 팩별 저장 분리(blabel_2329_full 39팩 = video가 전부 IMG_2329 → rally 번호로 키 구분)
+    key='balllabels_'+(data.video||'vid')+(data.rally!==undefined?('_r'+data.rally):'');
     const saved=localStorage.getItem(key); labels = saved ? JSON.parse(saved) : {};
-    // 기존 저장된 라벨에 isKey 필드 없으면 기본값 부여 (하위 호환)
+    // 기존 저장된 라벨에 신규 필드 없으면 기본값 부여 (하위 호환)
     for (const f in labels) {
       if (labels[f].isKey === undefined) labels[f].isKey = false;
+      if (labels[f].impact_type === undefined) labels[f].impact_type = '';
     }
-    cv.width=data.w;
-    cv.height = (data.h/data.w < 0.45) ? Math.round(data.h*2.2) : data.h;  // 크롭 팩 = 세로 2.2배 캔버스(표시 확대·픽셀 원본 유지)
-    fitView();
-    $('endtype').value = localStorage.getItem(key+'_end') || '';
-    loadFrame();
+    const setupCanvas=()=>{
+      cv.width=data.w;
+      cv.height = (data.h/data.w < 0.45) ? Math.round(data.h*2.2) : data.h;  // 크롭 팩 = 세로 2.2배 캔버스(표시 확대·픽셀 원본 유지)
+      fitView();
+      $('endtype').value = localStorage.getItem(key+'_end') || '';
+      loadFrame();
+    };
+    if (data.w && data.h) setupCanvas();
+    else {
+      // ★w/h 없는 팩(blabel_2329_full 계열) — 첫 프레임 이미지 실측 크기로 폴백
+      const probe=new Image();
+      probe.onload=()=>{ data.w=probe.naturalWidth; data.h=probe.naturalHeight; setupCanvas(); };
+      probe.src='data:image/jpeg;base64,'+data.frames[0].jpg;
+    }
   };
   rd.readAsText(f);
 });
@@ -390,13 +414,18 @@ $('csvfile').addEventListener('change', ev=>{
   rd.onload=()=>{
     const lines=rd.result.trim().split(/\r?\n/).filter(l=>l&&!l.startsWith('#'));
     const hdr=lines[0].split(',');
-    const fi=hdr.indexOf('frame'), xi=hdr.indexOf('x'), yi=hdr.indexOf('y'), ti=hdr.indexOf('tag'), ei=hdr.indexOf('end_type');
+    const fi=hdr.indexOf('frame'), xi=hdr.indexOf('x'), yi=hdr.indexOf('y'), ti=hdr.indexOf('tag'), ei=hdr.indexOf('end_type'), ii=hdr.indexOf('impact_type');
     let n=0, et='';
     lines.slice(1).forEach(l=>{
       const c=l.split(',');
       const fr=+c[fi]; if(isNaN(fr)) return;
+      if(ti>=0&&c[ti]==='none'){                        // ★배리어 복원(공없음)
+        labels[fr]={present:0,x:null,y:null,bounce:0,contact:0,impact_type:'',isKey:false,none:true};
+        if(ei>=0&&c[ei]) et=c[ei]; n++; return;
+      }
       labels[fr]={present:1, x:+c[xi], y:+c[yi],
-                  bounce:(ti>=0&&c[ti]==='bounce')?1:0, contact:(ti>=0&&c[ti]==='impact')?1:0, isKey:false};
+                  bounce:(ti>=0&&c[ti]==='bounce')?1:0, contact:(ti>=0&&c[ti]==='impact')?1:0,
+                  impact_type:(ii>=0&&c[ii])?c[ii]:'', isKey:false, none:false};
       if(ei>=0&&c[ei]) et=c[ei];
       n++;
     });
@@ -408,14 +437,18 @@ $('csvfile').addEventListener('change', ev=>{
   };
   rd.readAsText(f);
 });
-// 태그 체계(검토자 7/13): tag = impact(임팩트·첫 임팩트=서브) > bounce(바운스) > ball. end_type = 팩(랠리) 단위 택1 — 전 행 반복 기록.
+// 태그 체계(검토자 7/13·7/19 확장): tag = impact > bounce > ball (+none = 공없음 배리어 보존행).
+// impact_type = 임팩트 스윙 유형(1서브/2언더피드/3발리/4FH/5BH·빈 값 허용 — 구 라벨 호환).
+// end_type = 팩(랠리) 단위 택1 — 전 행 반복 기록.
 function csvText(){
   const et=$('endtype').value;
-  const rows=['frame,x,y,tag,end_type'];
+  const rows=['frame,x,y,tag,end_type,impact_type'];
   Object.keys(labels).map(Number).sort((a,b)=>a-b).forEach(f=>{
-    const L=labels[f]; if(!L.present || L.x==null) return;
+    const L=labels[f];
+    if(isBarrier(L)){ rows.push([f,'','','none',et,''].join(',')); return; }  // ★배리어 CSV 왕복 보존
+    if(!L.present || L.x==null) return;
     const tag = L.contact?'impact':(L.bounce?'bounce':'ball');
-    rows.push([f, L.x, L.y, tag, et].join(','));
+    rows.push([f, L.x, L.y, tag, et, L.contact?(L.impact_type||''):''].join(','));
   });
   return {et, text:'# '+(data.video||'vid')+'\n'+rows.join('\n')};
 }
@@ -438,8 +471,13 @@ document.addEventListener('keydown', e=>{
   if(!data || e.target.tagName==='SELECT') return;
   if(e.key==='b'||e.key==='B') $('bounce').click();
   else if(e.key==='i'||e.key==='I') $('contact').click();
+  else if(e.key==='n'||e.key==='N') $('none').click();
   else if(e.key==='ArrowLeft') $('prev').click();
   else if(e.key==='ArrowRight') $('next').click();
+  else if(awaitType && '12345'.includes(e.key)){
+    const L=lbl();
+    if(L.contact){ L.impact_type=IMPACT_TYPES[Number(e.key)]; awaitType=false; save(); render(); }
+  }
 });
 </script>
 </body>
