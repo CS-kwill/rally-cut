@@ -55,7 +55,7 @@
 const $=id=>document.getElementById(id);
 const cv=$('cv'), ctx=cv.getContext('2d');
 const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
-let data=null, idx=0, labels={}, key='', curImg=null;
+let data=null, idx=0, labels={}, key='', curImg=null, loadedName='';
 let view={scale:1,tx:0,ty:0}, fitScale=1;
 
 function curF(){ return data.frames[idx].f; }
@@ -377,6 +377,7 @@ $('uninterp').onclick=()=>{
 
 $('file').addEventListener('change', ev=>{
   const f=ev.target.files[0]; if(!f) return;
+  loadedName=(f.name||'').replace(/\.json$/i,'');   // ★CSV 저장명이 로드 팩명을 추종(오너 7/19)
   const rd=new FileReader();
   rd.onload=()=>{
     const parsed=JSON.parse(rd.result);
@@ -484,7 +485,7 @@ $('dl').onclick=()=>{
   if(!et && !confirm('종료유형이 미선택입니다. 그대로 저장할까요?')) return;
   const blob=new Blob([text], {type:'text/csv'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
-  a.download='ball_gt_'+(data.video||'vid')+'.csv'; a.click();
+  a.download='ball_gt_'+(loadedName||data.video||'vid')+'.csv'; a.click();   // 로드 팩명 추종
 };
 $('copy').onclick=async()=>{
   if(!data) return;
